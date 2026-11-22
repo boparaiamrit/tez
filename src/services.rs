@@ -1055,12 +1055,14 @@ pub fn spec(key: &str, sc: &ServiceConfig) -> R<Spec> {
 
 /// The DB_HOST that PHP projects use for tez's PostgreSQL.
 ///
-/// On macOS it is the socket folder, not 127.0.0.1. The static PHP builds tez uses there get
-/// PDO's PostgreSQL driver from Swoole (static-php-cli builds them with swoole-hook-pgsql instead
-/// of PHP's own pdo_pgsql), and Swoole's connect loop loses libpq's first packet on a TCP
-/// connection macOS has not finished opening: the server waits for a startup message that never
-/// comes and drops the connection after 60 seconds. Unix sockets connect at once, so they work;
-/// so does `pg_connect`, and so does TCP on Linux, where loopback connects complete immediately.
+/// On macOS it is the socket folder, not 127.0.0.1. static-php-cli's builds get PDO's PostgreSQL
+/// driver from Swoole (swoole-hook-pgsql instead of PHP's own pdo_pgsql), and Swoole's connect
+/// loop loses libpq's first packet on a TCP connection macOS has not finished opening: the server
+/// waits for a startup message that never comes and drops the connection after 60 seconds. Unix
+/// sockets connect at once, so they work; so does `pg_connect`, and so does TCP on Linux, where
+/// loopback connects complete immediately. tez's own Apple silicon builds (php.rs) use PHP's own
+/// pdo_pgsql and connect over TCP as well; the socket stays the default because it works with
+/// every build, including Intel Macs and versions only static-php-cli has.
 pub fn pg_host() -> String {
     if cfg!(target_os = "macos") { paths::fwd(&paths::run_dir()) } else { "127.0.0.1".into() }
 }

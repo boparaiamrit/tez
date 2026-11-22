@@ -4,10 +4,13 @@
 //! non-thread-safe, x64), with SHA-256 checked. PECL extensions (redis, mongodb, xdebug, and any
 //! other one asked for) come from downloads.php.net/~windows/pecl, matched to each PHP version.
 //!
-//! On macOS and Linux, builds are static-php-cli's prebuilt "bulk" set (dl.static-php.dev): one
-//! self-contained `php` and `php-fpm` per version with ~60 extensions compiled in (opcache,
-//! intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole...). Static
-//! builds cannot load extensions, so there is nothing to switch on or add per version.
+//! On macOS and Linux, builds are static: one self-contained `php` and `php-fpm` per version with
+//! ~60 extensions compiled in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql,
+//! pdo_sqlite, gd, imagick, swoole...). Static builds cannot load extensions, so there is nothing
+//! to switch on or add per version. On Apple silicon they come from tez's own builds
+//! (github.com/boparaiamrit/tez-php), which use PHP's own pdo_pgsql; everywhere else, and for
+//! versions tez has not built, from static-php-cli's "bulk" set (dl.static-php.dev), whose
+//! Swoole-provided pdo_pgsql cannot connect over TCP on macOS (see services::pg_host).
 
 use crate::config::Config;
 use crate::fetch;
@@ -22,6 +25,8 @@ const BASE: &str = "https://windows.php.net/downloads/releases/";
 const ARCHIVES: &str = "https://windows.php.net/downloads/releases/archives/";
 const PECL: &str = "https://downloads.php.net/~windows/pecl/releases/";
 const STATIC: &str = "https://dl.static-php.dev/static-php-cli/bulk/";
+/// tez's own static builds for Apple silicon; index.json lists them with their SHA-256.
+const OWN: &str = "https://github.com/boparaiamrit/tez-php/releases/download/builds/";
 
 /// Versions tez offers, oldest first (Herd's 7.4 to 8.5, plus 8.6).
 pub const MINORS: &[&str] = &["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"];
@@ -47,7 +52,96 @@ const BUNDLED: &[&str] = &[
 /// PECL extensions installed with every version, like Herd (xdebug is installed but off by default).
 pub const PECL_DEFAULT: &[&str] = &["redis", "mongodb", "xdebug"];
 
-pub struct Release { pub minor: String, pub version: String, pub zip: String, pub sha256: Option<String> }
+/// One PHP build to install. Windows: `zip` is the archive on windows.php.net. macOS and Linux:
+/// `zip` and `fpm` are the CLI and FPM archives under `base`.
+pub struct Release {
+    pub minor: String,
+    pub version: String,
+    pub zip: String,
+    pub sha256: Option<String>,
+    pub base: &'static str,
+    pub fpm: String,
+    pub fpm_sha256: Option<String>,
+}
+
+/// One static build for this machine: its two archives and where they live.
+#[derive(Clone)]
+struct UnixBuild { version: String, cli: String, fpm: String, base: &'static str, cli_sha256: Option<String>, fpm_sha256: Option<String> }
+
+impl UnixBuild {
+    fn minor(&self) -> String { self.version.split('.').take(2).collect::<Vec<_>>().join(".") }
+    fn release(&self) -> Release {
+        Release { minor: self.minor(), version: self.version.clone(), zip: self.cli.clone(), sha256: self.cli_sha256.clone(), base: self.base, fpm: self.fpm.clone(), fpm_sha256: self.fpm_sha256.clone() }
+    }
+}
+
+/// tez's own builds for this machine (Apple silicon only), from the builds release's index.json.
+fn own_builds() -> Vec<UnixBuild> {
+    if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) { return Vec::new(); }
+    let Ok(body) = fetch::get_text(&format!("{OWN}index.json")) else { return Vec::new() };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
+    own_builds_from(&json)
+}
+
+fn own_builds_from(json: &serde_json::Value) -> Vec<UnixBuild> {
+    json["builds"].as_array().into_iter().flatten()
+        .filter(|b| b["os"] == "macos" && b["arch"] == "aarch64")
+        .filter_map(|b| Some(UnixBuild {
+            version: b["version"].as_str()?.to_string(),
+            cli: b["cli"].as_str()?.to_string(),
+            fpm: b["fpm"].as_str()?.to_string(),
+            base: OWN,
+            cli_sha256: b["cli_sha256"].as_str().map(String::from),
+            fpm_sha256: b["fpm_sha256"].as_str().map(String::from),
+        }))
+        .collect()
+}
+
+/// static-php-cli's bulk builds in a listing of file names: those with both a CLI and an FPM archive.
+fn static_builds_from(names: &[String], os: &str, arch: &str) -> Vec<UnixBuild> {
+    let suffix = format!("-{os}-{arch}.tar.gz");
+    names.iter().filter_map(|n| {
+        let version = n.strip_prefix("php-")?.strip_suffix(&suffix)?.strip_suffix("-cli")?;
+        let fpm = format!("php-{version}-fpm{suffix}");
+        if !names.contains(&fpm) { return None; }
+        Some(UnixBuild { version: version.to_string(), cli: n.clone(), fpm, base: STATIC, cli_sha256: None, fpm_sha256: None })
+    }).collect()
+}
+
+/// Every static build for this machine: tez's own first, then static-php-cli's for the versions
+/// tez has not built.
+fn unix_builds() -> R<Vec<UnixBuild>> {
+    let mut out = own_builds();
+    let listing = fetch::get_text(&format!("{STATIC}?format=json")).and_then(|body| Ok(serde_json::from_str::<serde_json::Value>(&body)?));
+    match listing {
+        Ok(json) => {
+            let (os, arch) = static_target();
+            let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
+            for b in static_builds_from(&names, os, arch) {
+                if !out.iter().any(|o| o.version == b.version) { out.push(b); }
+            }
+        }
+        Err(e) if out.is_empty() => return Err(e),
+        Err(_) => {}
+    }
+    Ok(out)
+}
+
+/// The newest build of each minor tez offers here.
+fn newest_per_minor(builds: &[UnixBuild]) -> Vec<Release> {
+    let mut out: Vec<Release> = Vec::new();
+    for b in builds {
+        let minor = b.minor();
+        if !STATIC_MINORS.contains(&minor.as_str()) { continue; }
+        match out.iter_mut().find(|r| r.minor == minor) {
+            Some(r) if util::cmp_version(&b.version, &r.version) == std::cmp::Ordering::Greater => *r = b.release(),
+            Some(_) => {}
+            None => out.push(b.release()),
+        }
+    }
+    out.sort_by(|a, b| util::cmp_version(&a.minor, &b.minor));
+    out
+}
 
 pub fn releases() -> R<Vec<Release>> {
     if cfg!(windows) { windows_releases() } else { static_releases() }
@@ -59,31 +153,10 @@ fn static_target() -> (&'static str, &'static str) {
 }
 
 /// The newest patch of each minor that has both a CLI and an FPM build for this machine.
-fn static_releases() -> R<Vec<Release>> {
-    let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
-    let (os, arch) = static_target();
-    let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
-    Ok(static_pick(&names, os, arch))
-}
+fn static_releases() -> R<Vec<Release>> { Ok(newest_per_minor(&unix_builds()?)) }
 
-fn static_pick(names: &[String], os: &str, arch: &str) -> Vec<Release> {
-    let suffix = format!("-{os}-{arch}.tar.gz");
-    let mut out: Vec<Release> = Vec::new();
-    for n in names {
-        let Some(version) = n.strip_prefix("php-").and_then(|r| r.strip_suffix(&suffix)).and_then(|r| r.strip_suffix("-cli")) else { continue };
-        if !names.contains(&format!("php-{version}-fpm{suffix}")) { continue; }
-        let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
-        if !STATIC_MINORS.contains(&minor.as_str()) { continue; }
-        match out.iter_mut().find(|r| r.minor == minor) {
-            Some(r) if util::cmp_version(version, &r.version) == std::cmp::Ordering::Greater => { r.version = version.to_string(); r.zip = n.clone(); }
-            Some(_) => {}
-            None => out.push(Release { minor, version: version.to_string(), zip: n.clone(), sha256: None }),
-        }
-    }
-    out.sort_by(|a, b| util::cmp_version(&a.minor, &b.minor));
-    out
-}
+#[cfg(test)]
+fn static_pick(names: &[String], os: &str, arch: &str) -> Vec<Release> { newest_per_minor(&static_builds_from(names, os, arch)) }
 
 fn windows_releases() -> R<Vec<Release>> {
     let body = fetch::get_text(RELEASES)?;
@@ -100,6 +173,9 @@ fn windows_releases() -> R<Vec<Release>> {
                     version,
                     zip: b["zip"]["path"].as_str().unwrap_or_default().to_string(),
                     sha256: b["zip"]["sha256"].as_str().map(|s| s.to_string()),
+                    base: BASE,
+                    fpm: String::new(),
+                    fpm_sha256: None,
                 });
             }
         }
@@ -171,16 +247,7 @@ pub fn all_versions() -> R<Vec<(String, Vec<String>)>> {
         // releases.json can list a release before the directory listing shows it.
         for r in windows_releases().unwrap_or_default() { map.entry(r.minor.clone()).or_default().push(r.version); }
     } else {
-        let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
-        let json: serde_json::Value = serde_json::from_str(&body)?;
-        let (os, arch) = static_target();
-        let suffix = format!("-{os}-{arch}.tar.gz");
-        let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
-        for n in &names {
-            let Some(v) = n.strip_prefix("php-").and_then(|r| r.strip_suffix(&suffix)).and_then(|r| r.strip_suffix("-cli")) else { continue };
-            if !names.contains(&format!("php-{v}-fpm{suffix}")) { continue; }
-            map.entry(v.split('.').take(2).collect::<Vec<_>>().join(".")).or_default().push(v.to_string());
-        }
+        for b in unix_builds()? { map.entry(b.minor()).or_default().push(b.version); }
     }
     let mut out: Vec<(String, Vec<String>)> = map.into_iter().filter(|(m, _)| MINORS.contains(&m.as_str())).map(|(m, mut v)| {
         v.sort_by(|a, b| util::cmp_version(b, a));
@@ -198,15 +265,13 @@ fn release_for(minor: &str, version: &str) -> R<Release> {
         if let Some(r) = current { return Ok(r); }
         let found = windows_listings().into_iter().find(|(n, _)| windows_zip_version(n).as_deref() == Some(version));
         let Some((zip, _)) = found else { bail!("windows.php.net has no x64 NTS build of PHP {version}") };
-        return Ok(Release { minor: minor.to_string(), version: version.to_string(), zip, sha256: None });
+        return Ok(Release { minor: minor.to_string(), version: version.to_string(), zip, sha256: None, base: BASE, fpm: String::new(), fpm_sha256: None });
     }
-    let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
     let (os, arch) = static_target();
-    let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
-    let cli = format!("php-{version}-cli-{os}-{arch}.tar.gz");
-    if !names.contains(&cli) || !names.contains(&cli.replace("-cli-", "-fpm-")) { bail!("static-php.dev has no {os} {arch} build of PHP {version}"); }
-    Ok(Release { minor: minor.to_string(), version: version.to_string(), zip: cli, sha256: None })
+    match unix_builds()?.into_iter().find(|b| b.version == version) {
+        Some(b) => Ok(b.release()),
+        None => bail!("no {os} {arch} build of PHP {version} is published (tez's builds or static-php.dev)"),
+    }
 }
 
 /// Install (or update to the newest patch of) one PHP version.
@@ -222,7 +287,7 @@ pub fn install_version(minor: &str, version: Option<&str>, cfg: &Config) -> R<St
         Some(v) => Some(release_for(minor, v)?),
         None => releases()?.into_iter().find(|r| r.minor == minor),
     };
-    let Some(rel) = rel else { bail!("{} lists no build for PHP {minor}", if cfg!(windows) { "windows.php.net" } else { "static-php.dev" }) };
+    let Some(rel) = rel else { bail!("{} lists no build for PHP {minor}", if cfg!(windows) { "windows.php.net" } else { "Neither tez's builds nor static-php.dev" }) };
     let current = std::fs::read_to_string(paths::php_dir(minor).join(".tez-version")).unwrap_or_default();
     if current.trim() == rel.version && is_installed(minor) {
         util::ok(&format!("PHP {} is up to date", rel.version));
@@ -240,8 +305,18 @@ pub fn install_version(minor: &str, version: Option<&str>, cfg: &Config) -> R<St
         fetch::extract(&zip, &fresh, &[])?;
     } else {
         // Two single-file archives: `php` (the CLI) and `php-fpm` (the web pool).
-        for file in [rel.zip.clone(), rel.zip.replace("-cli-", "-fpm-")] {
-            let tgz = fetch::download(&format!("{STATIC}{file}"), &file)?;
+        for (file, sum) in [(&rel.zip, &rel.sha256), (&rel.fpm, &rel.fpm_sha256)] {
+            // tez's builds and static-php-cli's share file names; cache them apart.
+            let cached = if rel.base == OWN { format!("tez-php-{file}") } else { file.clone() };
+            let url = format!("{}{file}", rel.base);
+            let mut tgz = fetch::download(&url, &cached)?;
+            if let Some(sum) = sum {
+                // A rebuilt archive keeps its name: a cached copy that no longer matches is fetched again.
+                if fetch::verify_sha256(&tgz, sum).is_err() {
+                    tgz = fetch::download(&url, &cached)?;
+                    fetch::verify_sha256(&tgz, sum)?;
+                }
+            }
             fetch::extract(&tgz, &fresh, &[])?;
         }
         for exe in ["php", "php-fpm"] {
@@ -812,6 +887,27 @@ mod tests {
         assert_eq!(linux[0].zip, "php-8.4.23-cli-linux-x86_64.tar.gz");
         let mac = static_pick(&names, "macos", "aarch64");
         assert_eq!(mac[0].version, "8.3.32");
+        assert_eq!(mac[0].fpm, "php-8.3.32-fpm-macos-aarch64.tar.gz");
+    }
+    #[test]
+    fn reads_own_builds_index() {
+        let index = serde_json::json!({ "builds": [
+            { "version": "8.4.28", "minor": "8.4", "os": "macos", "arch": "aarch64",
+              "cli": "php-8.4.28-cli-macos-aarch64.tar.gz", "cli_sha256": "aa", "fpm": "php-8.4.28-fpm-macos-aarch64.tar.gz", "fpm_sha256": "bb" },
+            { "version": "8.4.28", "minor": "8.4", "os": "macos", "arch": "x86_64",
+              "cli": "php-8.4.28-cli-macos-x86_64.tar.gz", "fpm": "php-8.4.28-fpm-macos-x86_64.tar.gz" },
+        ]});
+        let own = own_builds_from(&index);
+        assert_eq!(own.len(), 1, "only Apple silicon builds are read");
+        let names: Vec<String> = ["php-8.4.23-cli-macos-aarch64.tar.gz", "php-8.4.23-fpm-macos-aarch64.tar.gz",
+            "php-8.3.32-cli-macos-aarch64.tar.gz", "php-8.3.32-fpm-macos-aarch64.tar.gz"].iter().map(|s| s.to_string()).collect();
+        let mut all = own.clone();
+        for b in static_builds_from(&names, "macos", "aarch64") { if !all.iter().any(|o| o.version == b.version) { all.push(b); } }
+        let newest = newest_per_minor(&all);
+        let r84 = newest.iter().find(|r| r.minor == "8.4").unwrap();
+        assert_eq!((r84.version.as_str(), r84.base, r84.sha256.as_deref(), r84.fpm_sha256.as_deref()), ("8.4.28", OWN, Some("aa"), Some("bb")));
+        let r83 = newest.iter().find(|r| r.minor == "8.3").unwrap();
+        assert_eq!((r83.version.as_str(), r83.base), ("8.3.32", STATIC));
     }
     #[test]
     fn normalizes_versions() {

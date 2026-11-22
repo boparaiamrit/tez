@@ -159,7 +159,7 @@ differs from Windows:
 
 | Part | macOS / Linux source | Notes |
 | --- | --- | --- |
-| PHP 8.0–8.5 | static-php-cli's prebuilt "bulk" builds (dl.static-php.dev) | One `php` and `php-fpm` per version with ~60 extensions built in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole). Extensions cannot be switched or added per version; PECL add-ons, Xdebug and PHP 7.4 are Windows-only for now |
+| PHP 8.0–8.5 | Apple silicon: tez's own static builds ([tez-php](https://github.com/boparaiamrit/tez-php)); elsewhere, and for versions tez has not built, static-php-cli's "bulk" builds (dl.static-php.dev) | One `php` and `php-fpm` per version with ~60 extensions built in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole). Extensions cannot be switched or added per version; PECL add-ons, Xdebug and PHP 7.4 are Windows-only for now |
 | PHP 8.6 | not published yet as a static build | Sites that need 8.6 run on Windows for now |
 | PHP pools | `php-fpm`, one master per version | `php_workers` children each |
 | Web server | Caddy 2.11, or Nginx 1.30 from jirutka/nginx-binaries | Nginx on macOS needs Homebrew's PCRE2 (`brew install pcre2`) |
@@ -169,10 +169,10 @@ differs from Windows:
 | MongoDB, MySQL, Mailpit, Meilisearch, RustFS | official builds per OS | MongoDB on Linux: Ubuntu, Debian, RHEL, Amazon Linux. RustFS: no Intel Mac build |
 
 On macOS, `tez adopt` and `tez setup` set `DB_HOST` to PostgreSQL's socket folder (`~/.tez/run`)
-instead of `127.0.0.1`. The static PHP builds get PDO's PostgreSQL driver from Swoole, which
-cannot open TCP connections on macOS: it waits 60 seconds, then fails. `pg_connect` and the
-socket both work. Keep PHP's `DB_HOST` on the socket; TablePlus and psql can still use
-`127.0.0.1`.
+instead of `127.0.0.1`. static-php-cli's builds get PDO's PostgreSQL driver from Swoole, which
+cannot open TCP connections on macOS: it waits 60 seconds, then fails. tez's own Apple silicon
+builds use PHP's own `pdo_pgsql` and connect over `127.0.0.1` too, but the socket works with every
+build, so it stays the default. TablePlus and psql can use `127.0.0.1`.
 
 Processes run in their own process groups instead of Job Objects; the daemon ends them all on
 `tez stop`, SIGTERM or SIGINT, and a new daemon ends any a crashed one left behind. `tez trust`
