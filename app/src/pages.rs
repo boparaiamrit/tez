@@ -1,7 +1,7 @@
 //! Every screen, built from the parts in ui.rs, laid out as on the design canvas.
 
 use crate::ui::*;
-use crate::{api, clone_repo, draft, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, site_log_choice, tez, txt, Page, Tez};
+use crate::{api, clone_repo, draft, ensure_pecl, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, site_log_choice, tez, txt, Page, Tez};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -676,11 +676,13 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
             .child(div().flex().flex_row().items_center().gap(px(14.)).child(tile(p, service_tone(&kind), 44., None, Some(service_icon(&kind))))
                 .child(div().flex().flex_col().child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title.clone())).child(muted(p, about))))
             .child(if !reason.is_empty() { muted(p, reason).into_any_element() } else {
-                div().flex().flex_row().flex_wrap().gap(px(8.)).children(list.into_iter().filter(|v| !v.is_empty()).map(|v| {
-                    let (k2, v2) = (k.clone(), v.clone());
-                    button(sid(format!("inst-{k}-{v}")), p, Kind::Secondary, false, Some("download"), Some(&format!("Install {v}")))
-                        .on_click(move |_, _, cx| send(cx, format!("/api/service/{k2}"), json!({ "install": v2.clone() }), "Installing"))
-                })).into_any_element()
+                let cat = service_versions(cx, &kind);
+                let opts: Vec<(String, String)> = if cat.is_empty() { list.iter().filter(|v| !v.is_empty()).map(|v| (v.clone(), v.clone())).collect() } else { cat };
+                let first = opts.first().map(|(v, _)| v.clone()).unwrap_or_default();
+                let k2 = k.clone();
+                div().flex().flex_col().gap(px(8.)).child(muted(p, format!("{} versions with a build for this computer", opts.len())))
+                    .child(version_picker(&format!("svc-new-{k}"), p, cx, opts, first, "Install", Rc::new(move |v, cx| send(cx, format!("/api/service/{k2}"), json!({ "install": v }), "Installing"))))
+                    .into_any_element()
             })
             .into_any_element();
     }
@@ -722,7 +724,12 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
             switch("svc-run", p, enabled).on_click(move |_, _, cx| send(cx, format!("/api/service/{n3}"), json!({ "enabled": !enabled }), if enabled { "Stopped; data kept" } else { "Starting" }))).into_any_element(),
         field(p, "Port", Some("Listens on 127.0.0.1 only. Sites need their .env changed too.".into()), false, div().w(px(120.)).child(input_el(&port_in, true))).into_any_element(),
     ];
-    if !add_versions.is_empty() {
+    let cat = service_versions(cx, &kind);
+    if !cat.is_empty() {
+        let k2 = kind.clone();
+        ess.push(field(p, "Version", Some(format!("Now {full}. Another major runs beside it on its own port; a patch of this one replaces it and keeps the data. {} versions available.", cat.len())), false,
+            version_picker(&format!("svc-{name}"), p, cx, cat, full.clone(), "Install", Rc::new(move |v, cx| send(cx, format!("/api/service/{k2}"), json!({ "install": v }), "Installing")))).into_any_element());
+    } else if !add_versions.is_empty() {
         ess.push(field(p, "Other versions", Some("Each runs beside the others on its own port".into()), false, div().flex().flex_row().flex_wrap().justify_end().gap(px(6.)).children(add_versions)).into_any_element());
     }
     out = out.child(card(p).child(card_head(p, "Essentials")).child(rows(p, ess)));
@@ -737,8 +744,18 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
             div().flex().flex_row().flex_wrap().items_center().gap(px(12.)).px(px(18.)).py(px(13.))
                 .child(div().flex_1().min_w(px(220.)).flex().flex_col().child(strong(p, en.clone())).child(muted(p, txt(&e[1]))))
                 .when_some(installed.clone(), |d, v| d.child(chip(p, v)).child(pill(p, Tone::Ok, "Installed", false)))
-                .child(button(sid(format!("pgx-{en}")), p, Kind::Secondary, true, if installed.is_some() { None } else { Some("download") }, Some(if installed.is_some() { "Add version" } else { "Install" }))
-                    .on_click(move |_, _, cx| send(cx, format!("/api/service/{nm}"), json!({ "extension": e2.clone() }), "Adding the extension")))
+                .child({
+                    let major = full.split('.').next().unwrap_or_default().to_string();
+                    let opts: Vec<(String, String)> = arr(&tez(cx).catalog["pg_extensions"][&en][&major]).iter().filter(|v| v["binary"] != false)
+                        .map(|v| { let ver = txt(&v["version"]); (ver.clone(), if v["installed"] == true { format!("{ver} · installed") } else { ver }) }).collect();
+                    if opts.is_empty() {
+                        button(sid(format!("pgx-{en}")), p, Kind::Secondary, true, if installed.is_some() { None } else { Some("download") }, Some(if installed.is_some() { "Add version" } else { "Install" }))
+                            .on_click(move |_, _, cx| send(cx, format!("/api/service/{nm}"), json!({ "extension": e2.clone() }), "Adding the extension")).into_any_element()
+                    } else {
+                        let first = opts.first().map(|(v, _)| v.clone()).unwrap_or_default();
+                        version_picker(&format!("pgx-{name}-{en}"), p, cx, opts, first, "Install", Rc::new(move |v, cx| send(cx, format!("/api/service/{nm}"), json!({ "extension": e2.clone(), "extension_version": v }), "Adding the extension"))).into_any_element()
+                    }
+                })
                 .into_any_element()
         }).collect();
         if !items.is_empty() {
@@ -859,6 +876,18 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
         .child(button("php-restart", p, Kind::Secondary, false, None, Some("Restart workers")).on_click(move |_, _, cx| send(cx, format!("/api/proc/php-{m_rs}/restart"), json!({}), "Restarting PHP")));
 
     let mut ess: Vec<AnyElement> = Vec::new();
+    {
+        let cat = tez(cx).catalog["php"].as_array().cloned().unwrap_or_default();
+        let patches: Vec<(String, String)> = cat.iter().find(|x| txt(&x["minor"]) == minor).map(|x| arr(&x["versions"]).iter().map(|v| {
+            let ver = txt(v);
+            (ver.clone(), if ver == txt(&x["installed"]) { format!("{ver} · installed") } else { ver })
+        }).collect()).unwrap_or_default();
+        if !patches.is_empty() {
+            let current = txt(&v["version"]);
+            ess.push(field(p, "Patch release", Some(format!("{} releases of PHP {minor}; your extensions are reinstalled for the one you pick", patches.len())), false,
+                version_picker(&format!("php-{minor}"), p, cx, patches, current, "Install", Rc::new(|ver, cx| send(cx, "/api/php".into(), json!({ "install_version": ver }), "Installing PHP")))).into_any_element());
+        }
+    }
     for key in ["memory_limit", "max_execution_time", "upload_max_filesize"] {
         let st = ini_input(key, window, cx);
         ess.push(field(p, key, Some(about_of(key)), true, div().w(px(130.)).child(input_el(&st, true))).into_any_element());
@@ -895,19 +924,41 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
             } else { pill(&pp, Tone::Ok, "Built in", false).into_any_element() })
             .into_any_element()
     }).collect();
-    let exact = exts.iter().any(|e| txt(&e["name"]).to_lowercase() == q);
-    let m_p = minor.clone();
-    let q2 = q.clone();
+    // Any PECL extension at any release: DLLs where PECL built one, a source build otherwise.
+    let valid_q = q.len() >= 2 && q.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let pecl_row: Option<AnyElement> = if pecl_ok && valid_q {
+        ensure_pecl(cx, &minor, &q);
+        let data = tez(cx).pecl.get(&format!("{minor}:{q}")).cloned();
+        let row = div().flex().flex_row().flex_wrap().items_center().gap(px(12.)).px(px(18.)).py(px(14.)).border_t_1().border_color(pp.line)
+            .child(icon("download", 14., pp.accent_text));
+        Some(match data {
+            None => row.child(muted(p, format!("Looking up {q} on PECL…"))).into_any_element(),
+            Some(d) if arr(&d["versions"]).is_empty() => row.child(muted(p, d["error"].as_str().map(|e| e.to_string()).unwrap_or_else(|| format!("PECL has no release called {q}")))).into_any_element(),
+            Some(d) => {
+                let list = arr(&d["versions"]);
+                let opts: Vec<(String, String)> = list.iter().map(|v| {
+                    let ver = txt(&v["version"]);
+                    let st = txt(&v["stability"]);
+                    (ver.clone(), format!("{ver} · {}{}", if v["binary"] == true { "DLL" } else { "builds from source" }, if st.is_empty() || st == "stable" { String::new() } else { format!(" · {st}") }))
+                }).collect();
+                let first = list.iter().find(|v| v["stability"] == "stable").map(|v| txt(&v["version"])).or_else(|| opts.first().map(|o| o.0.clone())).unwrap_or_default();
+                let binary: Vec<(String, bool)> = list.iter().map(|v| (txt(&v["version"]), v["binary"] == true)).collect();
+                let installed = txt(&d["installed"]);
+                let (m2, q2) = (minor.clone(), q.clone());
+                row.child(div().flex_1().min_w(px(220.)).flex().flex_col().child(strong(p, format!("{q} from PECL for PHP {minor}")))
+                        .child(muted(p, if installed.is_empty() { format!("{} releases", opts.len()) } else { format!("{installed} installed · {} releases", opts.len()) })))
+                    .child(version_picker(&format!("pecl-{minor}-{q}"), p, cx, opts, first, "Install", Rc::new(move |v, cx| {
+                        let source = !binary.iter().find(|(x, _)| *x == v).map(|(_, b)| *b).unwrap_or(false);
+                        send(cx, format!("/api/php/{m2}"), json!({ "install": q2.clone(), "version": v, "source": source }), if source { "Building from source" } else { "Installing" });
+                    })))
+                    .into_any_element()
+            }
+        })
+    } else { None };
     let ext_card = card(p)
         .child(card_head(p, "Extensions").child(muted(p, format!("{on_count} on, {} off", exts.len() - on_count))).child(div().flex_1()).child(div().w(px(280.)).child(input_el(&filter, false))))
         .child(div().flex().flex_row().flex_wrap().children(ext_cells))
-        .when(pecl_ok && !q.is_empty() && !exact && q.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), |d| d.child(
-            div().flex().flex_row().flex_wrap().items_center().gap(px(12.)).px(px(18.)).py(px(14.))
-                .child(icon("download", 14., pp.accent_text))
-                .child(div().flex_1().child(format!("Install {q} from PECL for PHP {minor}")))
-                .child(button("pecl-go", &pp, Kind::Secondary, true, None, Some("Install"))
-                    .on_click(move |_, _, cx| send(cx, format!("/api/php/{m_p}"), json!({ "install": q2.clone() }), "Installing")))));
-
+        .when_some(pecl_row, |d, r| d.child(r));
     // Collapsible groups
     let mut groups = div().flex().flex_col().gap(px(12.));
     for (title, keys) in PHP_GROUPS {
@@ -1087,3 +1138,20 @@ pub(crate) fn logs_page(p: &Pal, cx: &App) -> AnyElement {
 
 // ------------------------------------------------------------------ settings
 
+
+/// A version menu and an Install button. `versions` are (value, label), newest first.
+pub(crate) fn version_picker(id: &str, p: &Pal, cx: &App, versions: Vec<(String, String)>, default: String, verb: &str, on_install: Rc<dyn Fn(String, &mut App)>) -> Div {
+    let key = format!("ver:{id}");
+    let chosen = { let c = local(cx, &key); if c.is_empty() || !versions.iter().any(|(v, _)| *v == c) { default } else { c } };
+    let k2 = key.clone();
+    let sel = select(&format!("vp-{id}"), p, cx, &chosen, versions, 230., Rc::new(move |v, cx| set_local(cx, &k2, v)));
+    let c2 = chosen.clone();
+    div().flex().flex_row().items_start().gap(px(8.)).child(sel)
+        .child(button(sid(format!("vpi-{id}")), p, Kind::Secondary, false, Some("download"), Some(verb)).on_click(move |_, _, cx| on_install(c2.clone(), cx)))
+}
+
+/// Versions of a service from the catalog: (value, label) with "installed" marked.
+fn service_versions(cx: &App, kind: &str) -> Vec<(String, String)> {
+    arr(&tez(cx).catalog["services"][kind]["versions"]).iter().filter(|v| v["available"] != false)
+        .map(|v| { let ver = txt(&v["version"]); (ver.clone(), if v["installed"] == true { format!("{ver} · installed") } else { ver }) }).collect()
+}

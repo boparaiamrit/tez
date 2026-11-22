@@ -93,6 +93,11 @@ pub struct Tez {
     pub settings_open: bool,
     pub settings_sec: String,
     pub hover_x: Option<f32>,
+    /// /api/catalog: every version of every service, extension and PHP with a build here.
+    pub catalog: Value,
+    /// PECL releases per "minor:ext", loaded when someone types an extension name.
+    pub pecl: BTreeMap<String, Value>,
+    pub pecl_loading: BTreeSet<String>,
 }
 impl Global for Tez {}
 
@@ -204,6 +209,7 @@ struct Fetched {
     metrics: Option<Value>,
     site_metrics: Option<Value>,
     svc_metrics: Option<Value>,
+    catalog: Option<Value>,
 }
 
 /// The process whose log the site page shows ("laravel.log" for the app's own log).
@@ -260,6 +266,7 @@ fn fetch(w: Want) -> Fetched {
     if let Some(r) = w.metrics { f.metrics = api::get(&format!("/api/metrics?range={r}")).ok(); }
     if w.site_metrics { f.site_metrics = api::get("/api/sites/metrics?range=1h").ok(); }
     if w.svc_metrics { f.svc_metrics = api::get("/api/services/metrics").ok(); }
+    if w.full { f.catalog = api::get("/api/catalog").ok(); }
     f
 }
 
@@ -298,6 +305,7 @@ fn apply(cx: &mut App, f: Fetched) {
     if let Some(v) = f.metrics { if v.is_object() { t.metrics = v; } }
     if let Some(v) = f.site_metrics { if v.is_object() { t.site_metrics = v; } }
     if let Some(v) = f.svc_metrics { if v.is_object() { t.svc_metrics = v; } }
+    if let Some(v) = f.catalog { if v["services"].is_object() { t.catalog = v; } }
     // Drop drafts the server has caught up with (no save pending for them).
     let pending: Vec<String> = t.pending.keys().cloned().collect();
     t.drafts.retain(|k, _| pending.contains(k));
@@ -533,4 +541,23 @@ fn main() {
         start_loop(cx);
         if !background { show_window(cx); }
     });
+}
+
+/// Load PECL's releases of `ext` for PHP `minor` once, in the background.
+pub fn ensure_pecl(cx: &mut App, minor: &str, ext: &str) {
+    let key = format!("{minor}:{ext}");
+    let t = cx.global_mut::<Tez>();
+    if t.pecl.contains_key(&key) || t.pecl_loading.contains(&key) { return; }
+    t.pecl_loading.insert(key.clone());
+    let path = format!("/api/php/{minor}/pecl/{ext}");
+    cx.spawn(async move |cx| {
+        let r = cx.background_executor().spawn(async move { api::get(&path) }).await;
+        let _ = cx.update(|cx| {
+            let t = cx.global_mut::<Tez>();
+            t.pecl_loading.remove(&key);
+            t.pecl.insert(key, r.unwrap_or_else(|e| json!({ "error": e })));
+            cx.refresh_windows();
+        });
+    })
+    .detach();
 }
