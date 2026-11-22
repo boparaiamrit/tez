@@ -43,7 +43,8 @@ pub fn cacert() -> PathBuf { config_dir().join("cacert.pem") }
 pub fn logs_dir() -> PathBuf { home().join("logs") }
 pub fn cache_dir() -> PathBuf { home().join("cache") }
 pub fn run_dir() -> PathBuf { home().join("run") }
-pub fn local_ca_root() -> PathBuf { caddy_storage().join("pki").join("authorities").join("local").join("root.crt") }
+/// tez's own root certificate (tls.rs), the one `tez trust` installs.
+pub fn local_ca_root() -> PathBuf { config_dir().join("ca").join("root.crt") }
 
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [bin(), php_root(), lib_php(), services_root(), home().join("data"), config_dir(), logs_dir(), cache_dir(), run_dir()] {

@@ -363,8 +363,15 @@ pub fn start(shared: Shared) {
         let mut tails: HashMap<PathBuf, Tail> = HashMap::new();
         let mut log_at: HashMap<String, Instant> = HashMap::new();
         let mut svc_at: HashMap<String, Instant> = HashMap::new();
+        let mut rotated = Instant::now();
         loop {
             collect(&shared, &mut tails, &mut log_at, &mut svc_at);
+            // Caddy rolls its own access logs; Nginx needs tez to do it.
+            if rotated.elapsed() >= Duration::from_secs(60) {
+                rotated = Instant::now();
+                let cfg = Config::load();
+                if crate::web::server(&cfg) == "nginx" { crate::nginx::rotate_logs(&cfg, 10 << 20); }
+            }
             std::thread::sleep(Duration::from_secs(5));
         }
     });

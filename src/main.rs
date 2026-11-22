@@ -12,6 +12,7 @@ mod fetch;
 mod import;
 mod manage;
 mod metrics;
+mod nginx;
 mod paths;
 mod php;
 mod project;
@@ -21,6 +22,7 @@ mod sites;
 mod spec;
 mod stats;
 mod sys;
+mod tls;
 mod util;
 mod web;
 

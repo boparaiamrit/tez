@@ -151,7 +151,7 @@ pub fn extract(archive: &Path, dest: &Path, excludes: &[&str]) -> R<()> {
         for e in excludes { c.arg("--exclude").arg(e); }
         c
     };
-    let out = cmd.stdin(Stdio::null()).output()
+    let out = cmd.hidden().stdin(Stdio::null()).output()
         .map_err(|e| format!("could not run {} to unpack {}: {e}", if is_zip && !cfg!(windows) { "unzip" } else { "tar" }, archive.display()))?;
     if !out.status.success() {
         bail!("could not unpack {}: {}", archive.display(), String::from_utf8_lossy(&out.stderr));

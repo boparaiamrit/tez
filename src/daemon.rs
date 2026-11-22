@@ -234,13 +234,20 @@ pub fn plan(cfg: &Config) -> R<(Vec<Spec>, Vec<String>)> {
         match services::spec(name, sc) { Ok(s) => specs.push(s), Err(e) => notes.push(format!("{name}: {e}")) }
     }
     specs.extend(web::cgi_specs(cfg));
-    // Fetch the web server once if it is missing (first run, or after the switch to plain Caddy).
-    if !web::server_exe().exists() { if let Err(e) = web::install_server(cfg) { notes.push(format!("web server: {e}")); } }
-    if web::server_exe().exists() {
-        web::write_caddyfile(cfg)?;
-        let (_, _, port_notes) = web::effective_ports(cfg);
-        notes.extend(port_notes);
-        specs.push(web::spec(cfg));
+    if cfg.web_server.eq_ignore_ascii_case("nginx") && web::server(cfg) != "nginx" {
+        notes.push(format!("Nginx cannot run here, so Caddy serves the sites: {}", crate::nginx::available().1));
+    }
+    // Fetch the web server once if it is missing (first run, or after switching servers).
+    if !web::server_exe(cfg).exists() { if let Err(e) = web::install_server(cfg) { notes.push(format!("web server: {e}")); } }
+    if web::server_exe(cfg).exists() {
+        match web::write_config(cfg) {
+            Ok(_) => {
+                let (_, _, port_notes) = web::effective_ports(cfg);
+                notes.extend(port_notes);
+                specs.push(web::spec(cfg));
+            }
+            Err(e) => notes.push(format!("web server config: {e}")),
+        }
     } else {
         notes.push("the web server is not installed (tez install)".into());
     }
@@ -263,9 +270,9 @@ pub fn reload(shared: &Shared) -> R<Vec<String>> {
     d.notes = notes.clone();
     let web_after = d.procs.iter().find(|p| p.spec.name == "web").map(|p| p.spec.clone());
     drop(d);
-    // Same server, new sites: apply the Caddyfile in place.
+    // Same server, new sites: apply its config in place.
     if web_running && web_before == web_after && web_after.is_some() {
-        if let Err(e) = web::reload() {
+        if let Err(e) = web::reload(&cfg) {
             let mut d = shared.lock().unwrap();
             d.notes.push(e.to_string());
             d.restart("web");

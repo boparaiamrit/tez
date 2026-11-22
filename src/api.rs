@@ -131,7 +131,7 @@ pub fn status_json(shared: &Shared) -> serde_json::Value {
     let php_list: Vec<_> = php::installed().into_iter().map(|(m, v)| json!({ "minor": m, "version": v, "default": m == cfg.default_php })).collect();
     let svc_list = crate::manage::service_instances(&cfg);
     json!({
-        "tld": cfg.tld, "http_port": http, "https_port": https, "procs": procs, "sites": site_list,
+        "tld": cfg.tld, "http_port": http, "https_port": https, "web_server": web::server(&cfg), "procs": procs, "sites": site_list,
         "php": php_list, "services": svc_list, "notes": notes, "memory": total_mem, "home": paths::home(),
         "xdebug": cfg.xdebug, "version": env!("CARGO_PKG_VERSION"),
     })

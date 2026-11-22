@@ -14,6 +14,8 @@ pub struct Config {
     pub default_php: String,
     pub http_port: u16,
     pub https_port: u16,
+    /// The web server in front of every site: "caddy" (the default) or "nginx".
+    pub web_server: String,
     /// The tez daemon's own API and dashboard (loopback only).
     pub api_port: u16,
     /// php-cgi processes per PHP version (each serves one request at a time).
@@ -72,6 +74,7 @@ impl Default for Config {
             default_php: "8.4".into(),
             http_port: 80,
             https_port: 443,
+            web_server: "caddy".into(),
             api_port: 7979,
             php_workers: 6,
             xdebug: false,
