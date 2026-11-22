@@ -20,8 +20,10 @@ pub struct Tray {
 }
 
 /// A 32x32 icon drawn in code: a violet rounded square with a white lightning bolt ("tez" = fast).
+/// The macOS menu bar wants a template image instead: the bolt alone, which macOS tints.
 fn icon() -> Icon {
     const N: usize = 32;
+    let template = cfg!(target_os = "macos");
     let mut rgba = vec![0u8; N * N * 4];
     let bolt = [(18.0, 4.0), (8.0, 18.0), (15.0, 18.0), (12.0, 28.0), (24.0, 13.0), (17.0, 13.0), (20.0, 4.0)];
     let inside = |x: f32, y: f32| {
@@ -45,6 +47,10 @@ fn icon() -> Icon {
             let d = (dx * dx + dy * dy).sqrt();
             let alpha = ((r + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
             let i = (y * N + x) * 4;
+            if template {
+                if inside(fx, fy) { rgba[i] = 0; rgba[i + 1] = 0; rgba[i + 2] = 0; rgba[i + 3] = 255; }
+                continue;
+            }
             if alpha == 0 { continue; }
             let (cr, cg, cb) = if inside(fx, fy) { (255, 255, 255) } else { (110, 76, 240) };
             rgba[i] = cr; rgba[i + 1] = cg; rgba[i + 2] = cb; rgba[i + 3] = alpha;
@@ -69,6 +75,7 @@ impl Tray {
             .with_menu_on_left_click(false)
             .with_tooltip("tez")
             .with_icon(icon())
+            .with_icon_as_template(cfg!(target_os = "macos"))
             .build()
             .ok()?;
         Some(Tray {

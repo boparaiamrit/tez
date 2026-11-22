@@ -1,0 +1,54 @@
+name: CI
+
+# Every push and pull request: build, unit tests and an end-to-end smoke test on Windows and Linux.
+# macOS runs in the release workflow (on tags), because macOS minutes cost ten times as much on a
+# private repository.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux packages for the desktop app
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig1-dev libfreetype6-dev libasound2-dev libssl-dev \
+            libzstd-dev libdbus-1-dev pkg-config cmake clang jq
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test -p tez
+
+      - name: Build tez and the desktop app
+        run: cargo build --release --workspace
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/smoke.sh ./target/release/tez
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: ./scripts/smoke.ps1 ./target/release/tez.exe

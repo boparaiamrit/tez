@@ -1,6 +1,6 @@
 [package]
 name = "tez-app"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "The tez desktop app: a native GPUI Kit window and tray icon for the tez daemon."
 license = "MIT"
@@ -13,4 +13,5 @@ path = "src/main.rs"
 gpui-kit = "0.10.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tray-icon = "0.26.1"
+# ksni: the Linux tray speaks StatusNotifierItem over D-Bus itself, so no GTK event loop is needed.
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }

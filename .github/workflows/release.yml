@@ -1,0 +1,115 @@
+name: Release
+
+# Push a tag like v0.2.0: build on Windows, macOS (Apple silicon) and Linux, run the smoke test on
+# each, package, and attach everything to a GitHub release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-14
+            name: macos-arm64
+          - os: ubuntu-22.04
+            name: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux packages for the desktop app
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig1-dev libfreetype6-dev libasound2-dev libssl-dev \
+            libzstd-dev libdbus-1-dev pkg-config cmake clang jq
+
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        run: brew list jq >/dev/null 2>&1 || brew install jq
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test -p tez
+
+      - name: Build
+        run: cargo build --release --workspace
+
+      - name: Smoke test (macOS and Linux)
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/smoke.sh ./target/release/tez
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: ./scripts/smoke.ps1 ./target/release/tez.exe
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force dist\tez | Out-Null
+          Copy-Item target\release\tez.exe, target\release\tez-app.exe, README.md dist\tez
+          Compress-Archive -Path dist\tez\* -DestinationPath "tez-$v-${{ matrix.name }}.zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          v="${GITHUB_REF_NAME}"
+          app=dist/Tez.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/tez-app target/release/tez "$app/Contents/MacOS/"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Tez</string>
+            <key>CFBundleDisplayName</key><string>tez</string>
+            <key>CFBundleIdentifier</key><string>dev.tez.app</string>
+            <key>CFBundleExecutable</key><string>tez-app</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${v#v}</string>
+            <key>CFBundleVersion</key><string>${v#v}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          codesign --force --deep --sign - "$app"
+          hdiutil create -volname Tez -srcfolder "$app" -ov -format UDZO "tez-$v-${{ matrix.name }}.dmg"
+          tar -czf "tez-$v-${{ matrix.name }}-cli.tar.gz" -C target/release tez
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          v="${GITHUB_REF_NAME}"
+          mkdir -p dist/tez
+          cp target/release/tez target/release/tez-app README.md dist/tez/
+          printf '[Desktop Entry]\nName=tez\nComment=Fast native Laravel development\nExec=tez-app\nType=Application\nCategories=Development;\n' > dist/tez/tez.desktop
+          tar -czf "tez-$v-${{ matrix.name }}.tar.gz" -C dist tez
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tez-*.zip
+            tez-*.dmg
+            tez-*.tar.gz
+          generate_release_notes: true
