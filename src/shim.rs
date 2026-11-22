@@ -49,7 +49,10 @@ fn resolve_php() -> Result<std::path::PathBuf, String> {
 /// PHPRC inherited from another version's process never picks the wrong php.ini.
 fn php_command(exe: &std::path::Path) -> Command {
     let mut c = Command::new(exe);
-    if cfg!(unix) { if let Some(dir) = exe.parent() { c.env("PHPRC", dir); } }
+    if cfg!(unix) {
+        if let Some(dir) = exe.parent() { c.env("PHPRC", dir); }
+        if std::env::var_os("PGGSSENCMODE").is_none() { c.env("PGGSSENCMODE", "disable"); }
+    }
     c
 }
 

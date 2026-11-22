@@ -180,8 +180,8 @@ fn theseus_triple() -> &'static str {
     match (sys::os(), sys::arch()) {
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", _) => "x86_64-apple-darwin",
-        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
-        _ => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => "x86_64-unknown-linux-gnu",
     }
 }
 

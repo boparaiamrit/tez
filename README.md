@@ -141,6 +141,7 @@ Several versions of a service can run at once: `tez service install postgres 16`
 on its own port beside the default PostgreSQL 17.
 
 ## macOS and Linux
+nLinux needs glibc 2.36 or newer (Ubuntu 24.04, Debian 12, Fedora 37 and later): the PostgreSQL builds tez downloads are linked against it.
 
 The same `tez` binary runs on macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). What
 differs from Windows:

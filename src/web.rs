@@ -78,6 +78,8 @@ pub fn cgi_specs(cfg: &Config) -> Vec<Spec> {
                     .args(["-F".to_string(), "-y".into(), conf.display().to_string(), "-c".into(), dir.join("php.ini").display().to_string()])
                     .cwd(dir.clone())
                     .env("PHPRC", dir.display().to_string())
+                    // Local PostgreSQL has no Kerberos; asking for GSSAPI encryption breaks static libpq on macOS.
+                    .env("PGGSSENCMODE", "disable")
                     .port(cgi_port(&minor, 0)),
             );
             continue;
