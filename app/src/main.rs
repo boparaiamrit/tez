@@ -34,6 +34,7 @@ pub enum Page {
     NewSite,
     Services,
     Php,
+    Node,
     Dumps,
     Mail,
     Logs,
@@ -81,6 +82,8 @@ pub struct Tez {
     pub status: Value,
     pub settings: Value,
     pub php: Value,
+    /// /api/node: installed Node.js versions and the newest of each line.
+    pub node: Value,
     pub services: Value,
     pub jobs: Value,
     pub identities: Value,
@@ -257,6 +260,7 @@ fn navigate(cx: &mut App, target: &str) {
         "new" => { if !b.is_empty() { cx.global_mut::<Tez>().new_source = b.to_string(); } go(cx, Page::NewSite); }
         "services" => { if !b.is_empty() { cx.global_mut::<Tez>().svc_sel = b.to_string(); } go(cx, Page::Services); }
         "php" => go(cx, Page::Php),
+        "node" => go(cx, Page::Node),
         "dumps" => go(cx, Page::Dumps),
         "mail" => go(cx, Page::Mail),
         "logs" => go(cx, Page::Logs),
@@ -487,6 +491,7 @@ struct Want {
     metrics: Option<String>,
     site_metrics: bool,
     svc_metrics: bool,
+    node: bool,
 }
 
 #[derive(Default)]
@@ -507,6 +512,7 @@ struct Fetched {
     site_metrics: Option<Value>,
     svc_metrics: Option<Value>,
     catalog: Option<Value>,
+    node: Option<Value>,
 }
 
 /// The process whose log the site page shows ("laravel.log" for the app's own log).
@@ -537,6 +543,7 @@ fn want(cx: &App, full: bool) -> Want {
     if full || t.page == Page::Overview { w.metrics = Some(range); }
     w.site_metrics = full || matches!(t.page, Page::Overview | Page::Sites | Page::Site(_));
     w.svc_metrics = full || t.page == Page::Services;
+    w.node = full || t.page == Page::Node;
     w
 }
 
@@ -565,6 +572,7 @@ fn fetch(w: Want) -> Fetched {
     if w.site_metrics { f.site_metrics = api::get("/api/sites/metrics?range=1h").ok(); }
     if w.svc_metrics { f.svc_metrics = api::get("/api/services/metrics").ok(); }
     if w.full { f.catalog = api::get("/api/catalog").ok(); }
+    if w.node { f.node = api::get("/api/node").ok(); }
     f
 }
 
@@ -605,6 +613,7 @@ fn apply(cx: &mut App, f: Fetched) {
     if let Some(v) = f.site_metrics { if v.is_object() { t.site_metrics = v; } }
     if let Some(v) = f.svc_metrics { if v.is_object() { t.svc_metrics = v; } }
     if let Some(v) = f.catalog { if v["services"].is_object() { t.catalog = v; } }
+    if let Some(v) = f.node { if v.is_object() { t.node = v; } }
     // Changes in flight that the status now shows done (or failed, or never finished).
     let status = t.status.clone();
     let mut finished: Vec<(String, ui::Tone, String)> = Vec::new();

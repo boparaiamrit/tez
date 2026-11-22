@@ -12,6 +12,9 @@ pub struct Config {
     pub tld: String,
     /// PHP version used where no site, `.php-version` or `tez.json` picks one.
     pub default_php: String,
+    /// Node.js used where no site, .nvmrc, .node-version or package.json picks one ("22", or
+    /// empty for the newest LTS installed).
+    pub default_node: String,
     pub http_port: u16,
     pub https_port: u16,
     /// The web server in front of every site: "caddy" (the default) or "nginx".
@@ -46,6 +49,8 @@ pub struct Config {
 pub struct SiteSettings {
     /// Pin the site to a PHP version (`tez isolate 8.1`).
     pub php: Option<String>,
+    /// Pin the site to a Node.js version ("22"), over its .nvmrc and package.json.
+    pub node: Option<String>,
     /// Run the project's processes (Horizon or queue, Reverb, Vite, scheduler).
     pub up: bool,
     /// Turn single processes on or off ("schedule": true, "vite": false), over what tez detects.
@@ -74,6 +79,7 @@ impl Default for Config {
         Config {
             tld: "test".into(),
             default_php: "8.4".into(),
+            default_node: String::new(),
             http_port: 80,
             https_port: 443,
             web_server: "caddy".into(),

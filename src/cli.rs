@@ -47,6 +47,7 @@ fn dispatch(args: &[String]) -> R<()> {
         ["php", "install", vs @ ..] => php_install(vs),
         ["php", "update", vs @ ..] => php_update(vs),
         ["php", "remove", v] => php_remove(v),
+        ["node", rest @ ..] => crate::node::cli(rest),
         ["use", v] => use_php(v),
         ["isolate", v] => isolate(Some(v), None),
         ["isolate", v, site] => isolate(Some(v), Some(site)),
@@ -155,6 +156,13 @@ PHP
   tez versions pecl redis [--php 8.4] [--json]   every release of a PECL extension, with Windows DLLs
   tez xdebug on|off                     tez dumps on|off
 
+Node.js (npm and npx; pnpm and yarn through corepack)
+  tez node [list]                       installed versions, and the one this folder uses
+  tez node install lts | 22 | 22.11.0   install from nodejs.org (checked against its SHASUMS)
+  tez node default 22                   default version; a site's .nvmrc, .node-version or
+                                        package.json engines picks its own
+  tez node remove 20.19.5 | available | which
+
 Services
   tez services                          PostgreSQL+TimescaleDB, Redis, Mailpit, Meilisearch, S3
   tez service install|update|enable|disable|start|stop|restart <name>
@@ -199,7 +207,8 @@ pub fn install_binaries() -> R<()> {
     if !same_file(&me, &tez) { place_binary(&me, &tez)?; }
     // Windows: hard links (php.exe, composer.exe, exec.exe). macOS/Linux: symlinks to tez; the
     // shell's own `exec` builtin covers Horizon there, so no exec link.
-    let shims: &[&str] = if cfg!(windows) { &["php", "composer", "exec"] } else { &["php", "composer"] };
+    let mut shims: Vec<&str> = if cfg!(windows) { vec!["php", "composer", "exec"] } else { vec!["php", "composer"] };
+    shims.extend_from_slice(crate::node::SHIMS); // node, npm, npx, pnpm, yarn, corepack
     for name in shims {
         let dest = bin.join(sys::exe(name));
         if (dest.exists() || dest.symlink_metadata().is_ok()) && std::fs::remove_file(&dest).is_err() {
@@ -344,6 +353,8 @@ fn install(rest: &[&str]) -> R<()> {
     install_binaries()?;
     install_cacert()?;
     install_composer()?;
+    // Node.js for Vite and npm: the newest LTS, unless tez already has one.
+    if let Err(e) = crate::node::ensure_installed() { util::warn(&format!("Node.js was not installed ({e}); run `tez node install lts` later")); }
     for v in &want_php {
         if !php::is_installed(v) { php::install(v, &cfg)?; } else { php::write_ini(v, &cfg)?; }
     }
@@ -1022,7 +1033,7 @@ fn setup(dir: &Path) -> R<()> {
     if !php.exists() { php::install(&site.php, &cfg)?; }
     let run = |label: &str, exe: &Path, args: &[&str]| -> bool {
         util::step(label);
-        let st = std::process::Command::new(exe).args(args).current_dir(&site.path).env("PATH", project::child_path()).status();
+        let st = std::process::Command::new(exe).args(args).current_dir(&site.path).env("PATH", project::child_path_in(&site.path)).status();
         match st { Ok(s) if s.success() => true, _ => { util::warn(&format!("{label} did not finish; continuing")); false } }
     };
     crate::import::ensure_laravel_dirs(&site.path);
@@ -1047,7 +1058,12 @@ fn setup(dir: &Path) -> R<()> {
     }
     if site.path.join("package.json").exists() {
         let npm_name = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        if let Some(npm) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(npm_name)).find(|p| p.exists()) {
+        // tez's Node.js for this site first; then an npm on PATH.
+        if let Some((node, pre)) = crate::node::command_in(&site.path, "npm") {
+            let mut a: Vec<&str> = pre.iter().map(|s| s.as_str()).collect();
+            a.extend(["install", "--no-audit", "--no-fund"]);
+            run("npm install", &node, &a);
+        } else if let Some(npm) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(npm_name)).find(|p| p.exists()) {
             run("npm install", &npm, &["install", "--no-audit", "--no-fund"]);
         } else { util::warn("Node.js is not installed; skipping npm install"); }
     }

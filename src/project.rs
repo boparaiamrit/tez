@@ -133,10 +133,21 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// PATH for child processes: tez's bin first, so `php` and `composer` resolve to tez's versions.
-pub fn child_path() -> String {
+/// PATH for child processes: tez's Node.js (the default) and tez's bin first, so `node`, `php`
+/// and `composer` resolve to tez's versions.
+#[allow(dead_code)]
+pub fn child_path() -> String { path_with_node(crate::node::default_path_dir()) }
+
+/// The same for a command run in `dir`: the Node.js that folder's site or .nvmrc picks.
+pub fn child_path_in(dir: &Path) -> String { path_with_node(crate::node::path_dir_in(dir)) }
+
+fn path_with_node(node: Option<PathBuf>) -> String {
     let current = std::env::var("PATH").unwrap_or_default();
-    format!("{}{}{current}", paths::bin().display(), crate::sys::PATH_SEP)
+    let sep = crate::sys::PATH_SEP;
+    match node {
+        Some(n) => format!("{}{sep}{}{sep}{current}", n.display(), paths::bin().display()),
+        None => format!("{}{sep}{current}", paths::bin().display()),
+    }
 }
 
 pub fn specs(cfg: &Config, site: &Site) -> R<Vec<Spec>> {
@@ -146,6 +157,9 @@ pub fn specs(cfg: &Config, site: &Site) -> R<Vec<Spec>> {
         let mut raw = false;
         let (exe, args): (PathBuf, Vec<String>) = if p.command[0] == "@php" {
             (php.clone(), p.command[1..].to_vec())
+        } else if let Some((node, pre)) = crate::node::command_for(cfg, site, &p.command[0]) {
+            // npm/npx (Vite) on tez's Node.js for this site.
+            (node, pre.into_iter().chain(p.command[1..].iter().cloned()).collect())
         } else {
             let found = which(&p.command[0]).ok_or_else(|| format!("{} is not on PATH", p.command[0]))?;
             let is_script = found.extension().map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat")).unwrap_or(false);
@@ -174,7 +188,7 @@ pub fn specs(cfg: &Config, site: &Site) -> R<Vec<Spec>> {
         let mut s = Spec::new(format!("{}/{}", site.name, p.name), format!("site:{}", site.name), exe)
             .args(args)
             .cwd(site.path.clone())
-            .env("PATH", child_path())
+            .env("PATH", child_path_in(&site.path))
             .env("TEZ_SITE", site.name.clone());
         s.raw = raw;
         if p.name == "horizon" { s = s.url(format!("{}/horizon", site.url(cfg))); }

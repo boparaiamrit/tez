@@ -13,6 +13,7 @@ mod import;
 mod manage;
 mod metrics;
 mod nginx;
+mod node;
 mod paths;
 mod php;
 mod project;
@@ -38,6 +39,8 @@ fn main() {
         "php" => shim::php(rest),
         "composer" => shim::composer(rest),
         "exec" => shim::exec(rest),
+        // Node.js shims: the version for the current folder.
+        "node" | "npm" | "npx" | "pnpm" | "yarn" | "corepack" => node::shim(&stem, rest),
         _ => cli::run(rest),
     };
     std::process::exit(code);

@@ -399,6 +399,7 @@ pub fn site_get(name: &str) -> R<Value> {
         "url": s.url(&cfg), "laravel": s.laravel, "linked": s.linked, "processes": procs,
         "config_files": files, "env": env_groups(&s.path), "has_vendor": s.path.join("vendor").exists(),
         "has_node_modules": s.path.join("node_modules").exists(),
+        "node": crate::node::site_json(&cfg, &s),
     }))
 }
 
@@ -450,6 +451,7 @@ pub fn site_set(shared: &Shared, name: &str, body: &Value) -> R<Value> {
         entry.php = match body["php"].as_str() { Some(v) if !v.is_empty() => Some(php::normalize(v)?), _ => None };
     }
     if let Some(v) = body["up"].as_bool() { entry.up = v; }
+    let wants_node = crate::node::apply_site(entry, body)?; // "node": "22" | null
     if let Some(list) = body["domains"].as_array() {
         let mut ds: Vec<String> = Vec::new();
         for d in list.iter().filter_map(|x| x.as_str()) {
@@ -467,6 +469,9 @@ pub fn site_set(shared: &Shared, name: &str, body: &Value) -> R<Value> {
     }
     let wants_php = entry.php.clone();
     cfg.save()?;
+    if let Some(v) = wants_node {
+        return Ok(json!({ "ok": true, "job": start_job(&["node".into(), "install".into(), v.clone()], None, &format!("Install Node.js {v}"))? }));
+    }
     if let Some(v) = wants_php {
         if !php::is_installed(&v) {
             return Ok(json!({ "ok": true, "job": start_job(&["php".into(), "install".into(), v.clone()], None, &format!("Install PHP {v}"))? }));
@@ -553,7 +558,7 @@ static JOBS: Mutex<Vec<JobRec>> = Mutex::new(Vec::new());
 
 /// Run a tez command in the background with its output in a log. Only tez's own commands.
 pub fn start_job(args: &[String], cwd: Option<&Path>, title: &str) -> R<u32> {
-    const ALLOWED: &[&str] = &["php", "service", "pg", "ext", "clone", "setup", "db", "adopt", "import", "composer", "npm", "artisan", "doctor", "trust", "hosts"];
+    const ALLOWED: &[&str] = &["php", "node", "service", "pg", "ext", "clone", "setup", "db", "adopt", "import", "composer", "npm", "artisan", "doctor", "trust", "hosts"];
     let first = args.first().map(|s| s.as_str()).unwrap_or_default();
     if !ALLOWED.contains(&first) { bail!("'{first}' cannot be run from the dashboard"); }
     let mut jobs = JOBS.lock().unwrap();
@@ -563,7 +568,11 @@ pub fn start_job(args: &[String], cwd: Option<&Path>, title: &str) -> R<u32> {
     let log = dir.join(format!("job-{id}.log"));
     let f = std::fs::File::create(&log)?;
     let bin = paths::bin();
+    let job_dir = cwd.map(|p| p.to_path_buf()).unwrap_or_else(paths::home);
+    // npm on tez's Node.js for that folder, when tez has one.
+    let tez_npm = if first == "npm" { crate::node::command_in(&job_dir, "npm") } else { None };
     let (exe, rest): (PathBuf, Vec<String>) = match first {
+        "npm" if tez_npm.is_some() => { let (node, pre) = tez_npm.unwrap(); (node, pre.into_iter().chain(args[1..].iter().cloned()).collect()) }
         "composer" => (bin.join(sys::exe("composer")), args[1..].to_vec()),
         "artisan" => (bin.join(sys::exe("php")), std::iter::once("artisan".to_string()).chain(args[1..].iter().cloned()).collect()),
         "npm" if cfg!(windows) => {
@@ -574,8 +583,8 @@ pub fn start_job(args: &[String], cwd: Option<&Path>, title: &str) -> R<u32> {
         _ => (bin.join(sys::exe("tez")), args.to_vec()),
     };
     let child = Command::new(exe).args(rest)
-        .current_dir(cwd.map(|p| p.to_path_buf()).unwrap_or_else(paths::home))
-        .env("PATH", project::child_path())
+        .current_dir(&job_dir)
+        .env("PATH", project::child_path_in(&job_dir))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null()).stdout(Stdio::from(f.try_clone()?)).stderr(Stdio::from(f))
         .hidden()
