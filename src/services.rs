@@ -1068,11 +1068,14 @@ pub fn pg_host() -> String {
 }
 
 /// psql against tez's main PostgreSQL.
-pub fn psql(cfg: &Config, db: &str, sql: &str) -> R<String> {
-    let sc = cfg.services.get("postgres").cloned().unwrap_or_default();
-    let version = version_of("postgres", &sc);
-    let port = port_of("postgres", &sc);
-    let out = std::process::Command::new(dir("postgres", &version).join("bin").join(sys::exe("psql"))).hidden()
+pub fn psql(cfg: &Config, db: &str, sql: &str) -> R<String> { psql_on(cfg, "postgres", db, sql) }
+
+/// psql against one PostgreSQL instance ("postgres", "postgres@16").
+pub fn psql_on(cfg: &Config, key: &str, db: &str, sql: &str) -> R<String> {
+    let sc = cfg.services.get(key).cloned().unwrap_or_default();
+    let version = version_of(key, &sc);
+    let port = port_of(key, &sc);
+    let out = std::process::Command::new(dir(key, &version).join("bin").join(sys::exe("psql"))).hidden()
         .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-tAc", sql])
         .output()?;
     if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }
