@@ -224,6 +224,12 @@ pub fn adopt(cfg: &Config, site: &Site) -> R<Vec<String>> {
     if env.contains_key("REVERB_HOST") && env.get("REVERB_HOST").map(|h| h == "reverb" || h == "0.0.0.0").unwrap_or(false) {
         set(&mut changes, "REVERB_HOST", "localhost".into());
     }
+    // Inside a container 0.0.0.0 was needed; natively it would expose Reverb to the whole network.
+    // Reverb's own default is 0.0.0.0 too, so set it whenever the project uses Reverb.
+    let uses_reverb = env.keys().any(|k| k.starts_with("REVERB_")) || env.get("BROADCAST_CONNECTION").map(|b| b == "reverb").unwrap_or(false);
+    if uses_reverb && env.get("REVERB_SERVER_HOST").map(|h| h == "0.0.0.0").unwrap_or(true) {
+        set(&mut changes, "REVERB_SERVER_HOST", "127.0.0.1".into());
+    }
     // Multi-domain apps (Route::domain(config('app.admin_domain'))): serve every *_DOMAIN host.
     let mut domains: Vec<String> = Vec::new();
     for (k, v) in &env {
