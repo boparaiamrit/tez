@@ -55,6 +55,8 @@ fn dispatch(args: &[String]) -> R<()> {
         ["which"] => which(),
         ["ext", "install", name, rest @ ..] => ext_install(name, rest),
         ["ext", "list"] => ext_list(),
+        ["versions", "pecl", ext, rest @ ..] => versions_pecl(ext, rest),
+        ["versions", rest @ ..] => versions(rest),
         ["xdebug", state] => xdebug(state),
         ["dumps", state] => dumps(state),
         ["park"] => park(None, true),
@@ -138,6 +140,8 @@ PHP
   tez isolate 8.1 [site]                pin a site; unisolate to undo
   tez which                             the php binary used in this folder
   tez ext install imagick [--php all] [--version 3.8.0] [--source]   any PECL extension; compiled when PECL has no DLL
+  tez versions [--json] [--refresh]   every version of every service, PostgreSQL extension and PHP
+  tez versions pecl redis [--php 8.4] [--json]   every release of a PECL extension, with Windows DLLs
   tez xdebug on|off                     tez dumps on|off
 
 Services
@@ -1191,5 +1195,64 @@ fn doctor(rest: &[&str]) -> R<()> {
         let code = sys::run_elevated(Path::new("powershell.exe"), &["-NoProfile".into(), "-Command".into(), script])?;
         if code == 0 { util::ok("Defender no longer scans tez or your site folders"); } else { util::warn("Defender exclusions were not added"); }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- versions
+
+/// tez versions [--json] [--refresh]: the version catalog, built here (no daemon needed).
+fn versions(rest: &[&str]) -> R<()> {
+    let v = crate::catalog::get(rest.contains(&"--refresh"));
+    if rest.contains(&"--json") { println!("{}", serde_json::to_string_pretty(&v)?); return Ok(()); }
+    let mark = |o: &serde_json::Value| {
+        let ver = o["version"].as_str().unwrap_or_default();
+        if o["installed"].as_bool() == Some(true) { green(&format!("{ver}*")) }
+        else if o["available"].as_bool() == Some(false) || o["binary"].as_bool() == Some(false) { dim(ver) }
+        else { ver.to_string() }
+    };
+    println!("{}  {}", bold("Services"), dim("(* installed, dim: no build for this machine)"));
+    for (k, s) in v["services"].as_object().into_iter().flatten() {
+        let list: Vec<serde_json::Value> = s["versions"].as_array().cloned().unwrap_or_default();
+        let shown: Vec<String> = list.iter().take(12).map(mark).collect();
+        let more = if list.len() > 12 { dim(&format!(" +{} more", list.len() - 12)) } else { String::new() };
+        let err = s["error"].as_str().map(|e| red(&format!("  {e}"))).unwrap_or_default();
+        println!("  {:<14}{}{more}{err}", s["title"].as_str().unwrap_or(k), shown.join(" "));
+    }
+    println!("{}", bold("PostgreSQL extensions"));
+    for (e, per) in v["pg_extensions"].as_object().into_iter().flatten() {
+        for (m, list) in per.as_object().into_iter().flatten() {
+            let list: Vec<serde_json::Value> = list.as_array().cloned().unwrap_or_default();
+            if list.is_empty() { continue; }
+            let shown: Vec<String> = list.iter().take(10).map(mark).collect();
+            let more = if list.len() > 10 { dim(&format!(" +{} more", list.len() - 10)) } else { String::new() };
+            println!("  {:<18}{}", format!("{e} pg{m}"), shown.join(" ") + &more);
+        }
+    }
+    if let Some(n) = v["pg_extensions_note"].as_str() { println!("  {}", dim(n)); }
+    println!("{}", bold("PHP"));
+    for p in v["php"].as_array().into_iter().flatten() {
+        let inst = p["installed"].as_str().unwrap_or_default().to_string();
+        let list: Vec<String> = p["versions"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).take(12)
+            .map(|x| if x == inst { green(&format!("{x}*")) } else { x.to_string() }).collect();
+        let total = p["versions"].as_array().map(|a| a.len()).unwrap_or(0);
+        let more = if total > 12 { dim(&format!(" +{} more", total - 12)) } else { String::new() };
+        println!("  {:<14}{}{more}", format!("PHP {}", p["minor"].as_str().unwrap_or_default()), list.join(" "));
+    }
+    Ok(())
+}
+
+/// tez versions pecl <ext> [--php 8.4] [--json]
+fn versions_pecl(ext: &str, rest: &[&str]) -> R<()> {
+    let cfg = Config::load();
+    let minor = rest.iter().position(|a| *a == "--php").and_then(|i| rest.get(i + 1)).map(|s| s.to_string()).unwrap_or(cfg.default_php.clone());
+    let v = crate::catalog::pecl_versions(&minor, ext)?;
+    if rest.contains(&"--json") { println!("{}", serde_json::to_string_pretty(&v)?); return Ok(()); }
+    println!("{} for PHP {}  {}", bold(ext), v["minor"].as_str().unwrap_or_default(),
+        v["installed"].as_str().map(|i| green(&format!("installed {i}"))).unwrap_or_else(|| dim("not installed")));
+    for o in v["versions"].as_array().into_iter().flatten() {
+        let how = if o["binary"].as_bool() == Some(true) { green("Windows DLL") } else if v["builds_from_source"].as_bool() == Some(true) && o["source"].as_bool() == Some(true) { yellow("compiled from source") } else { dim("no build") };
+        println!("  {:<12} {:<8} {how}", o["version"].as_str().unwrap_or_default(), o["stability"].as_str().unwrap_or_default());
+    }
+    if let Some(n) = v["note"].as_str() { println!("{}", dim(n)); }
     Ok(())
 }

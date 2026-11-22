@@ -3,6 +3,7 @@
 //! are compiled into tez.
 
 use crate::paths;
+use crate::sys::Hidden;
 use crate::util::R;
 use crate::bail;
 use std::io::IsTerminal;
@@ -13,7 +14,8 @@ const UA: &str = "tez/0.1 (+https://github.com/boparaiamrit/tez)";
 
 fn curl() -> Command {
     let mut c = Command::new(paths::tool("curl"));
-    c.stdin(Stdio::null());
+    // The daemon has no console: without this every request would flash a window.
+    c.stdin(Stdio::null()).hidden();
     c
 }
 
@@ -43,6 +45,16 @@ pub fn get_text(url: &str) -> R<String> {
         bail!("download failed ({}): {url}", out.status.code().unwrap_or(-1));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// GET with a few retries and a short pause between them, for listings fetched in parallel.
+pub fn get_text_retry(url: &str, tries: u32) -> R<String> {
+    let mut last = None;
+    for i in 0..tries.max(1) {
+        match get_text(url) { Ok(t) => return Ok(t), Err(e) => last = Some(e) }
+        std::thread::sleep(std::time::Duration::from_millis(400 * (i as u64 + 1)));
+    }
+    Err(last.unwrap_or_else(|| "no attempt made".into()))
 }
 
 /// True when the URL answers 200 to a HEAD request (after redirects).

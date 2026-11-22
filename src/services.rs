@@ -13,7 +13,7 @@ use crate::config::{Config, ServiceConfig};
 use crate::fetch;
 use crate::paths;
 use crate::spec::Spec;
-use crate::sys;
+use crate::sys::{self, Hidden};
 use crate::util::{self, R};
 use crate::bail;
 use std::path::{Path, PathBuf};
@@ -535,7 +535,7 @@ fn init_postgres(major: &str) -> R<()> {
     let bin = dir("postgres", major).join("bin");
     std::fs::create_dir_all(data.parent().unwrap())?;
     util::step("Creating the database cluster (superuser `postgres`, local connections trusted)");
-    let out = std::process::Command::new(bin.join(sys::exe("initdb")))
+    let out = std::process::Command::new(bin.join(sys::exe("initdb"))).hidden()
         .arg("-D").arg(&data)
         .args(["-U", "postgres", "-E", "UTF8", "--locale=C", "--auth=trust"])
         .output()?;
@@ -556,7 +556,7 @@ fn init_mariadb(s: &str) -> R<()> {
     util::step("Creating the MariaDB data folder (user root, no password, local only)");
     let out = if cfg!(windows) {
         let tool = first_existing(&base.join("bin"), &["mariadb-install-db.exe", "mysql_install_db.exe"]);
-        std::process::Command::new(tool).arg(format!("--datadir={}", data.display())).output()?
+        std::process::Command::new(tool).arg(format!("--datadir={}", data.display())).hidden().output()?
     } else {
         // The Linux archive keeps the script in scripts/; root gets an empty password (no unix_socket).
         let tool = first_existing(&base.join("scripts"), &["mariadb-install-db", "mysql_install_db"]);
@@ -577,6 +577,7 @@ fn init_mysql(s: &str) -> R<()> {
     let d = dir("mysql", s);
     util::step("Creating the MySQL data folder (user root, no password, local only)");
     let mut cmd = std::process::Command::new(d.join("bin").join(sys::exe("mysqld")));
+    cmd.hidden();
     if !cfg!(windows) { cmd.arg("--no-defaults"); }
     cmd.arg("--initialize-insecure");
     if cfg!(windows) { cmd.arg("--console"); }
@@ -1056,7 +1057,7 @@ pub fn psql(cfg: &Config, db: &str, sql: &str) -> R<String> {
     let sc = cfg.services.get("postgres").cloned().unwrap_or_default();
     let version = version_of("postgres", &sc);
     let port = port_of("postgres", &sc);
-    let out = std::process::Command::new(dir("postgres", &version).join("bin").join(sys::exe("psql")))
+    let out = std::process::Command::new(dir("postgres", &version).join("bin").join(sys::exe("psql"))).hidden()
         .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-tAc", sql])
         .output()?;
     if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }
@@ -1095,7 +1096,7 @@ pub fn mysql_exec(cfg: &Config, key: &str, sql: &str) -> R<String> {
     let version = version_of(key, &sc);
     let bin = dir(kind(key), &version).join("bin");
     let client = first_existing(&bin, &[sys::exe("mariadb").as_str(), sys::exe("mysql").as_str()]);
-    let out = std::process::Command::new(client)
+    let out = std::process::Command::new(client).hidden()
         .args(["-u", "root", "-h", "127.0.0.1", &format!("--port={}", port_of(key, &sc)), "-N", "-e", sql])
         .output()?;
     if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }

@@ -12,7 +12,7 @@
 use crate::config::Config;
 use crate::fetch;
 use crate::paths;
-use crate::sys;
+use crate::sys::{self, Hidden};
 use crate::util::{self, R};
 use crate::bail;
 use std::path::{Path, PathBuf};
@@ -291,7 +291,7 @@ fn valid_ext_name(ext: &str) -> R<()> {
 
 /// Versions with a Windows build folder on downloads.php.net, newest first.
 pub fn pecl_windows_versions(ext: &str) -> Vec<String> {
-    let Ok(listing) = fetch::get_text(&format!("{PECL}{ext}/")) else { return Vec::new() };
+    let Ok(listing) = fetch::get_text_retry(&format!("{PECL}{ext}/"), 3) else { return Vec::new() };
     let mut v: Vec<String> = fetch::hrefs(&listing).into_iter()
         .filter_map(|h| h.strip_suffix('/').map(|s| s.to_string()))
         .filter(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
@@ -303,7 +303,7 @@ pub fn pecl_windows_versions(ext: &str) -> Vec<String> {
 
 /// Every release pecl.php.net has published for an extension, newest first: (version, stability).
 pub fn pecl_source_releases(ext: &str) -> Vec<(String, String)> {
-    let Ok(xml) = fetch::get_text(&format!("https://pecl.php.net/rest/r/{}/allreleases.xml", ext.to_ascii_lowercase())) else { return Vec::new() };
+    let Ok(xml) = fetch::get_text_retry(&format!("https://pecl.php.net/rest/r/{}/allreleases.xml", ext.to_ascii_lowercase()), 3) else { return Vec::new() };
     let mut out = Vec::new();
     let mut rest = xml.as_str();
     while let Some(i) = rest.find("<r>") {
@@ -317,15 +317,17 @@ pub fn pecl_source_releases(ext: &str) -> Vec<(String, String)> {
     out
 }
 
-/// The Windows DLL zip of one extension version for one PHP version, if PECL built it.
-fn pecl_dll_file(ext: &str, ver: &str, minor: &str, flavor: &str) -> Option<String> {
-    let files = fetch::hrefs(&fetch::get_text(&format!("{PECL}{ext}/{ver}/")).ok()?);
+/// The Windows DLL zip of one extension version for one PHP version: Ok(None) when PECL has no
+/// build of it, Err when the listing could not be read (never mistaken for "no build").
+fn pecl_dll_file(ext: &str, ver: &str, minor: &str, flavor: &str) -> R<Option<String>> {
+    let files = fetch::hrefs(&fetch::get_text_retry(&format!("{PECL}{ext}/{ver}/"), 3).map_err(|e| format!("could not read PECL's {ext} {ver} builds: {e}"))?);
     let want: Vec<String> = vc_tags().iter().map(|vc| format!("php_{ext}-{ver}-{minor}-{flavor}-{vc}-x64.zip")).collect();
-    files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_string()).find(|f| want.contains(f))
+    Ok(files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_string()).find(|f| want.contains(f)))
 }
 
-/// Whether one extension version has a Windows DLL for a PHP version (NTS, x64).
-pub fn pecl_has_dll(ext: &str, ver: &str, minor: &str) -> bool { pecl_dll_file(ext, ver, minor, "nts").is_some() }
+/// Whether one extension version has a Windows DLL for a PHP version (NTS, x64); Err when PECL
+/// could not be reached.
+pub fn pecl_has_dll(ext: &str, ver: &str, minor: &str) -> R<bool> { Ok(pecl_dll_file(ext, ver, minor, "nts")?.is_some()) }
 
 /// Download a PECL DLL zip and put php_<ext>.dll in ext/ and any helper DLLs beside php.exe.
 fn place_dll_zip(php_dir: &Path, ext: &str, ver: &str, minor: &str, flavor: &str, file: &str) -> R<bool> {
@@ -373,7 +375,7 @@ pub fn pecl_install_want(php_dir: &Path, minor: &str, ext: &str, ts: bool, want:
     match want {
         PeclWant::Exact(ver) => {
             if !force_source {
-                if let Some(file) = pecl_dll_file(ext, ver, minor, flavor) {
+                if let Some(file) = pecl_dll_file(ext, ver, minor, flavor)? {
                     if place_dll_zip(php_dir, ext, ver, minor, flavor, &file)? { return Ok(ver.clone()); }
                 }
                 util::step(&format!("PECL has no Windows {flavor} build of {ext} {ver} for PHP {minor}; compiling it from source"));
@@ -386,7 +388,7 @@ pub fn pecl_install_want(php_dir: &Path, minor: &str, ext: &str, ts: bool, want:
                 .or_else(|| pecl_windows_versions(ext).into_iter().find(|v| !util::is_prerelease(v)));
             let Some(ver) = newest else { bail!("PECL lists no release of '{ext}'") };
             if !force_source {
-                if let Some(file) = pecl_dll_file(ext, &ver, minor, flavor) {
+                if let Some(file) = pecl_dll_file(ext, &ver, minor, flavor)? {
                     if place_dll_zip(php_dir, ext, &ver, minor, flavor, &file)? { return Ok(ver); }
                 }
                 util::step(&format!("The newest {ext} ({ver}) has no Windows {flavor} build for PHP {minor}; compiling it from source"));
@@ -407,7 +409,7 @@ pub fn pecl_install_want(php_dir: &Path, minor: &str, ext: &str, ts: bool, want:
             let candidates = if stable.is_empty() { versions } else { stable };
             // Old PHP versions (7.4, 8.0) need older extension releases, so look back far enough.
             for ver in candidates.iter().take(60) {
-                if let Some(file) = pecl_dll_file(ext, ver, minor, flavor) {
+                if let Ok(Some(file)) = pecl_dll_file(ext, ver, minor, flavor) {
                     if place_dll_zip(php_dir, ext, ver, minor, flavor, &file)? { return Ok(ver.clone()); }
                 }
             }
@@ -436,6 +438,7 @@ pub fn pecl_installed_version(minor: &str, ext: &str) -> Option<String> {
     let php = php_exe(minor);
     if !php.exists() { return None; }
     let mut cmd = std::process::Command::new(&php);
+    cmd.hidden();
     if LOADABLE_EXTENSIONS {
         if !has_ext(&dir, ext) { return None; }
         let directive = if matches!(ext, "xdebug" | "opcache") { "zend_extension" } else { "extension" };
@@ -451,7 +454,7 @@ pub fn pecl_installed_version(minor: &str, ext: &str) -> Option<String> {
 fn visual_studio() -> Option<PathBuf> {
     let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into())).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
     if !vswhere.exists() { return None; }
-    let out = std::process::Command::new(vswhere)
+    let out = std::process::Command::new(vswhere).hidden()
         .args(["-products", "*", "-latest", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
         .output().ok()?;
     let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
@@ -531,7 +534,18 @@ pub fn build_from_source(php_dir: &Path, minor: &str, ext: &str, ver: &str, ts: 
     let script = build.join("tez-build.bat");
     std::fs::write(&script, bat)?;
     util::step(&format!("Compiling {ext} {ver} for PHP {full} ({switch}) with {}", vs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
-    let st = std::process::Command::new("cmd.exe").arg("/c").arg(&script).current_dir(&src).status()?;
+    // No console window: the output is piped through to tez's own output (the job log).
+    let mut child = std::process::Command::new(paths::system32("cmd.exe")).arg("/c").arg(&script).current_dir(&src)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).hidden().spawn()?;
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let forward = |r: Option<Box<dyn std::io::Read + Send>>| std::thread::spawn(move || {
+        use std::io::BufRead;
+        if let Some(r) = r { for line in std::io::BufReader::new(r).lines().map_while(Result::ok) { println!("{line}"); } }
+    });
+    let t1 = forward(out.map(|o| Box::new(o) as Box<dyn std::io::Read + Send>));
+    let t2 = forward(err.map(|e| Box::new(e) as Box<dyn std::io::Read + Send>));
+    let st = child.wait()?;
+    let _ = (t1.join(), t2.join());
     if !st.success() { bail!("compiling {ext} {ver} failed at step {} (1 Visual Studio, 2 phpize, 3 configure, 4 nmake); the output above has the reason", st.code().unwrap_or(-1)); }
     let dll = walk(&src.join("x64")).into_iter().find(|p| {
         let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
@@ -613,7 +627,7 @@ pub fn modules(php_dir: &Path) -> Vec<String> {
         if !v.is_empty() { return v; }
     }
     let exe = php_dir.join(sys::exe("php"));
-    let Ok(out) = std::process::Command::new(&exe).args(["-n", "-m"]).output() else { return Vec::new() };
+    let Ok(out) = std::process::Command::new(&exe).args(["-n", "-m"]).hidden().output() else { return Vec::new() };
     let mut v: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
         .map(|l| l.trim().to_ascii_lowercase().replace(' ', "_"))
         .filter(|l| !l.is_empty() && !l.starts_with('['))

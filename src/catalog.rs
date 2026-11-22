@@ -180,18 +180,25 @@ pub fn pecl_versions(minor: &str, ext: &str) -> R<Value> {
                     list.push((w.clone(), if util::is_prerelease(w) { "beta".into() } else { "stable".into() }));
                 }
             }
-            if list.is_empty() { bail!("PECL lists no release of '{ext}'"); }
+            if list.is_empty() {
+                // Tell "PECL has no such extension" apart from "PECL could not be reached".
+                if fetch::get_text_retry("https://pecl.php.net/rest/p/packages.xml", 2).is_err() { bail!("could not reach pecl.php.net; try again in a moment"); }
+                bail!("PECL lists no release of '{ext}'");
+            }
             list.sort_by(|a, b| util::cmp_version(&b.0, &a.0));
             list.truncate(40);
-            let bins: Vec<bool> = if cfg!(windows) {
-                fetch::par_map(&list, 12, |(v, _)| win.iter().any(|w| w == v) && php::pecl_has_dll(ext, v, &minor))
-            } else { vec![false; list.len()] };
+            let checks: Vec<R<bool>> = if cfg!(windows) {
+                fetch::par_map(&list, 6, |(v, _)| if win.iter().any(|w| w == v) { php::pecl_has_dll(ext, v, &minor) } else { Ok(false) })
+            } else { list.iter().map(|_| Ok(false)).collect() };
+            // A listing that could not be read is not "no DLL": such an answer is not kept.
+            let complete = checks.iter().all(|c| c.is_ok());
+            let bins: Vec<bool> = checks.into_iter().map(|c| c.unwrap_or(false)).collect();
             let v = json!({
                 "ext": ext, "minor": minor,
                 "versions": list.iter().zip(bins).map(|((v, s), b)| json!({ "version": v, "stability": s, "binary": b, "source": source.iter().any(|(sv, _)| sv == v) })).collect::<Vec<_>>(),
                 "builds_from_source": cfg!(windows),
             });
-            write_json(&file, &v);
+            if complete { write_json(&file, &v); }
             v
         }
     };
