@@ -127,6 +127,33 @@ also has logs, dumps and a config file editor.
 Several versions of a service can run at once: `tez service install postgres 16` adds `postgres@16`
 on its own port beside the default PostgreSQL 17.
 
+## macOS and Linux
+
+The same `tez` binary runs on macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). What
+differs from Windows:
+
+| Part | macOS / Linux source | Notes |
+| --- | --- | --- |
+| PHP 8.0–8.5 | static-php-cli's prebuilt "bulk" builds (dl.static-php.dev) | One `php` and `php-fpm` per version with ~60 extensions built in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole). Extensions cannot be switched or added per version; PECL add-ons, Xdebug and PHP 7.4 are Windows-only for now |
+| PHP 8.6 | FrankenPHP's own PHP | Web only; no `php` 8.6 command |
+| PHP pools | `php-fpm`, one master per version | `php_workers` children each |
+| Web server | FrankenPHP 1.14 static binary | Intel Macs get plain Caddy (FrankenPHP has no build for them) |
+| PostgreSQL 14–18 | theseus-rs/postgresql-binaries | TimescaleDB, PostGIS and pgvector are Windows-only for now |
+| Redis | compiled from the source release with `make` | Needs the Xcode Command Line Tools, or `build-essential` on Linux |
+| MariaDB | official bintar | Linux x86_64 only |
+| MongoDB, MySQL, Mailpit, Meilisearch, RustFS | official builds per OS | MongoDB on Linux: Ubuntu, Debian, RHEL, Amazon Linux. RustFS: no Intel Mac build |
+
+Processes run in their own process groups instead of Job Objects; the daemon ends them all on
+`tez stop`, SIGTERM or SIGINT, and a new daemon ends any a crashed one left behind. `tez trust`
+and `tez hosts` use `sudo` (the CA goes into the System keychain on macOS, or
+`update-ca-certificates` / `update-ca-trust` on Linux). Start at sign-in is a LaunchAgent on macOS
+and an XDG autostart entry on Linux. `tez install` adds `~/.tez/bin` to PATH in `~/.zshrc`,
+`~/.bashrc` or `~/.profile`. On Linux, ports 80 and 443 need root, so tez serves on 8088 and 8443.
+
+For CI and scripts: `tez install --php 8.4 --services redis,postgres` (or `--services none`)
+installs without prompts, `tez start` works without a display, and `tez status --json` prints the
+daemon's state.
+
 ## Horizon on Windows
 
 Windows PHP has no `pcntl` or `posix` extension, and Horizon needs both. tez loads a small PHP
