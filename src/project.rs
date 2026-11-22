@@ -224,16 +224,62 @@ pub fn adopt(cfg: &Config, site: &Site) -> R<Vec<String>> {
     if env.contains_key("REVERB_HOST") && env.get("REVERB_HOST").map(|h| h == "reverb" || h == "0.0.0.0").unwrap_or(false) {
         set(&mut changes, "REVERB_HOST", "localhost".into());
     }
+    // Multi-domain apps (Route::domain(config('app.admin_domain'))): serve every *_DOMAIN host.
+    let mut domains: Vec<String> = Vec::new();
+    for (k, v) in &env {
+        if !k.ends_with("_DOMAIN") || v.is_empty() || v.contains("://") { continue; }
+        let host = v.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+        if host.is_empty() || host.contains(['/', ' ']) || !host.chars().any(|c| c.is_ascii_alphabetic()) { continue; }
+        if host == "localhost" || host == "127.0.0.1" {
+            let ours = format!("{}.{}", site.name, cfg.tld);
+            if !changes.iter().any(|(ck, _)| ck == k) { changes.push((Box::leak(k.clone().into_boxed_str()), ours)); }
+        } else {
+            domains.push(host);
+        }
+    }
     let mut report: Vec<String> = changes.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if !domains.is_empty() {
+        let mut c = Config::load();
+        let entry = c.site_mut(&site.name);
+        for d in &domains { if !entry.domains.contains(d) { entry.domains.push(d.clone()); } }
+        c.save()?;
+        report.push(format!("serves {}", domains.join(", ")));
+    }
     if !changes.is_empty() { util::write_env_keys(&env_path, &changes)?; }
 
+    let db = env.get("DB_DATABASE").cloned().unwrap_or_else(|| site.name.replace(['-', '.'], "_"));
+    let user = env.get("DB_USERNAME").cloned().unwrap_or_default();
+    let pass = env.get("DB_PASSWORD").cloned().unwrap_or_default();
     if conn == "pgsql" {
-        let db = env.get("DB_DATABASE").cloned().unwrap_or_else(|| site.name.replace(['-', '.'], "_"));
-        let user = env.get("DB_USERNAME").cloned().unwrap_or_default();
-        let pass = env.get("DB_PASSWORD").cloned().unwrap_or_default();
         crate::services::ensure_database(cfg, &db, &user, &pass)?;
-        let testing = format!("{db}_testing");
-        let _ = crate::services::ensure_database(cfg, &testing, &user, &pass);
+        let _ = crate::services::ensure_database(cfg, &format!("{db}_testing"), &user, &pass);
+    }
+    if conn == "mysql" || conn == "mariadb" {
+        let want = if conn == "mariadb" { "mariadb" } else { "mysql" };
+        let key = crate::services::first_instance(cfg, want).or_else(|| crate::services::first_instance(cfg, if want == "mysql" { "mariadb" } else { "mysql" }));
+        match key {
+            Some(key) => {
+                let port = crate::services::port_of(&key, cfg.services.get(&key).unwrap());
+                let mut more: Vec<(&str, String)> = Vec::new();
+                if env.get("DB_HOST").map(|h| h != "127.0.0.1").unwrap_or(true) { more.push(("DB_HOST", "127.0.0.1".into())); }
+                more.push(("DB_PORT", port.to_string()));
+                util::write_env_keys(&env_path, &more)?;
+                report.extend(more.iter().map(|(k, v)| format!("{k}={v}")));
+                crate::services::ensure_mysql_database(cfg, &key, &db, &user, &pass)?;
+                let _ = crate::services::ensure_mysql_database(cfg, &key, &format!("{db}_testing"), &user, &pass);
+            }
+            None => report.push(format!("DB_CONNECTION={conn}: install it with `tez service install {want}`")),
+        }
+    }
+    if let Some(uri) = env.get("MONGODB_URI").or(env.get("DB_URI")) {
+        if uri.contains("mongo") && !uri.contains("127.0.0.1") {
+            if let Some(key) = crate::services::first_instance(cfg, "mongodb") {
+                let port = crate::services::port_of(&key, cfg.services.get(&key).unwrap());
+                let k = if env.contains_key("MONGODB_URI") { "MONGODB_URI" } else { "DB_URI" };
+                util::write_env_keys(&env_path, &[(k, format!("mongodb://127.0.0.1:{port}"))])?;
+                report.push(format!("{k}=mongodb://127.0.0.1:{port}"));
+            }
+        }
     }
     report.extend(optimize(site));
     Ok(report)

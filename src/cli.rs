@@ -63,10 +63,24 @@ fn dispatch(args: &[String]) -> R<()> {
         ["unlink"] => unlink(None),
         ["unlink", name] => unlink(Some(name)),
         ["sites"] | ["links"] | ["parked"] => sites_list(),
+        ["domain", "add", host] => domain(true, host, None),
+        ["domain", "add", host, site] => domain(true, host, Some(site)),
+        ["domain", "remove", host] => domain(false, host, None),
+        ["domain", "remove", host, site] => domain(false, host, Some(site)),
         ["service"] | ["services"] | ["service", "list"] | ["services", "list"] => services_list(),
         ["service", "install", name] => service_install(name, None),
         ["service", "install", name, ver] => service_install(name, Some(ver)),
         ["service", "update", name] => service_update(name),
+        ["pg", "ext", "install", ext, rest @ ..] => pg_ext(ext, rest),
+        ["pg", "ext"] | ["pg", "ext", "list"] => {
+            let cfg = Config::load();
+            for (k, sc) in cfg.services.iter().filter(|(k, _)| services::kind(k) == "postgres") {
+                let v = services::version_of(k, sc);
+                println!("{} {}", bold(&format!("{k} (PostgreSQL {v})")), services::pg_extensions_installed(&v).iter().map(|(n, x)| format!("{n} {x}")).collect::<Vec<_>>().join(", "));
+            }
+            for (n, about) in services::PG_EXTENSIONS { println!("  {:<12} {}", n, dim(about)); }
+            Ok(())
+        }
         ["service", "enable", name] => service_enable(name, true),
         ["service", "disable", name] => service_enable(name, false),
         ["service", action @ ("start" | "stop" | "restart"), name] => proc_action(name, action),
@@ -109,6 +123,7 @@ Sites (folders in ~\Sites are served at https://<folder>.test)
   tez park [dir] | unpark [dir]         serve every folder inside dir
   tez link [name] | unlink [name]       serve the current folder
   tez sites                             list sites with PHP versions and URLs
+  tez domain add admin.app.test [site]  extra domains for multi-domain apps (remove to undo)
   tez trust                             trust HTTPS and add hosts entries (asks for admin once)
 
 PHP
@@ -124,6 +139,8 @@ PHP
 Services
   tez services                          PostgreSQL+TimescaleDB, Redis, Mailpit, Meilisearch, S3
   tez service install|update|enable|disable|start|stop|restart <name>
+  tez service install postgres 16       a second version runs beside the first (postgres@16)
+  tez pg ext install postgis|pgvector|timescaledb [version] [--pg 17]
   tez db create|list | db import <file> <db> | db pull <container> <db> [--user u]
 
 Projects
@@ -577,12 +594,34 @@ fn services_list() -> R<()> {
 
 fn service_install(name: &str, ver: Option<&str>) -> R<()> {
     let mut cfg = Config::load();
-    let v = services::install(name, ver)?;
-    let e = cfg.services.entry(name.into()).or_default();
+    let info = services::info(name)?;
+    let kind = services::kind(name).to_string();
+    let want = ver.unwrap_or(info.version).to_string();
+    // A second version of a service runs beside the first, on its own port: postgres@16.
+    let key = if name.contains('@') { name.to_string() } else { services::instance_key(&cfg, &kind, &want) };
+    let v = services::install(&kind, Some(&want))?;
+    let port = match cfg.services.get(&key) { Some(sc) if sc.port != 0 => sc.port, _ if key == kind => 0, _ => services::free_port(&cfg, info.port + 1) };
+    let e = cfg.services.entry(key.clone()).or_default();
     e.version = v;
     e.enabled = true;
+    e.port = port;
     cfg.save()?;
+    if key != kind { util::ok(&format!("runs as `{key}` on port {port}")); }
     reload_if_running()
+}
+
+fn pg_ext(ext: &str, rest: &[&str]) -> R<()> {
+    let cfg = Config::load();
+    let (mut pg, mut version) = (None, None);
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--pg" { pg = rest.get(i + 1).map(|s| s.to_string()); i += 2; } else { version = Some(rest[i]); i += 1; }
+    }
+    let pg = pg.unwrap_or_else(|| services::version_of("postgres", &cfg.services.get("postgres").cloned().unwrap_or_default()));
+    services::install_pg_extension(&services::series("postgres", &pg), ext, version)?;
+    if ext == "timescaledb" { if api::running() { let _ = api::call("POST", "/api/proc/postgres/restart"); } }
+    println!("  {}", dim(&format!("enable it in a database with: CREATE EXTENSION {};", if ext == "pgvector" { "vector" } else { ext })));
+    Ok(())
 }
 
 fn service_update(name: &str) -> R<()> {
@@ -689,7 +728,8 @@ fn adopt() -> R<()> {
     let changes = project::adopt(&cfg, &site)?;
     util::ok(&format!("{} now uses tez's services (original saved as .env.sail)", site.name));
     for c in changes { println!("  {}", dim(&c)); }
-    Ok(())
+    hosts_hint(&Config::load());
+    reload_if_running()
 }
 
 /// Clone a GitHub repository into the first parked folder and set it up.
@@ -799,9 +839,30 @@ fn logs(name: &str, rest: &[&str]) -> R<()> {
 fn hosts_file() -> PathBuf { paths::system32("drivers").join("etc").join("hosts") }
 
 fn wanted_hosts(cfg: &Config) -> Vec<String> {
-    let mut v: Vec<String> = sites::all(cfg).into_iter().map(|s| s.host(&cfg.tld)).collect();
+    let mut v: Vec<String> = Vec::new();
+    for s in sites::all(cfg) {
+        v.push(s.host(&cfg.tld));
+        // *.localhost resolves by itself; wildcards cannot go in a hosts file.
+        v.extend(s.settings.domains.iter().map(|d| d.to_ascii_lowercase()).filter(|d| !d.ends_with(".localhost") && d != "localhost" && !d.contains('*')));
+    }
     v.push(format!("tez.{}", cfg.tld));
+    v.dedup();
     v
+}
+
+fn domain(add: bool, host: &str, site: Option<&str>) -> R<()> {
+    let mut cfg = Config::load();
+    let name = match site { Some(s) => s.to_string(), None => current_site(&cfg)?.name };
+    if sites::find(&cfg, &name).is_none() { bail!("no site named {name}"); }
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() || host.contains(['/', ' ', ',']) { bail!("'{host}' is not a host name"); }
+    let entry = cfg.site_mut(&name);
+    entry.domains.retain(|d| d != &host);
+    if add { entry.domains.push(host.clone()); }
+    cfg.save()?;
+    util::ok(&format!("{name} {} {host}", if add { "now answers on" } else { "no longer answers on" }));
+    if add { hosts_hint(&cfg); }
+    reload_if_running()
 }
 
 fn missing_hosts(cfg: &Config) -> Vec<String> {

@@ -114,12 +114,18 @@ pub fn caddyfile(cfg: &Config) -> String {
     ));
 
     for site in sites::all(cfg) {
-        let hosts = [
+        let mut hosts = vec![
             format!("http://{}.{}", site.name, cfg.tld),
             format!("https://{}.{}", site.name, cfg.tld),
             format!("http://{}.localhost", site.name),
             format!("https://{}.localhost", site.name),
         ];
+        for d in &site.settings.domains {
+            let d = d.trim().to_ascii_lowercase();
+            if d.is_empty() || d == "localhost" || d.contains(['/', ' ', ',', '{', '}']) { continue; }
+            hosts.push(format!("http://{d}"));
+            hosts.push(format!("https://{d}"));
+        }
         s.push_str(&format!("# {}  ({})\n", site.name, site.path.display()));
         s.push_str(&hosts.join(", "));
         s.push_str(" {\n\ttls internal\n");

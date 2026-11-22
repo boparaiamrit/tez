@@ -118,13 +118,7 @@ pub fn status_json(shared: &Shared) -> serde_json::Value {
         })
     }).collect();
     let php_list: Vec<_> = php::installed().into_iter().map(|(m, v)| json!({ "minor": m, "version": v, "default": m == cfg.default_php })).collect();
-    let svc_list: Vec<_> = services::CATALOG.iter().map(|i| {
-        let sc = cfg.services.get(i.name).cloned().unwrap_or_default();
-        let version = if sc.version.is_empty() { i.version.to_string() } else { sc.version.clone() };
-        json!({ "name": i.name, "title": i.title, "about": i.about, "version": version,
-                "installed": services::is_installed(i.name, &version), "enabled": cfg.services.get(i.name).map(|s| s.enabled).unwrap_or(false),
-                "port": if sc.port == 0 { i.port } else { sc.port } })
-    }).collect();
+    let svc_list = crate::manage::service_instances(&cfg);
     json!({
         "tld": cfg.tld, "http_port": http, "https_port": https, "procs": procs, "sites": site_list,
         "php": php_list, "services": svc_list, "notes": notes, "memory": total_mem, "home": paths::home(),
@@ -211,6 +205,7 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
         ("GET", ["api", "settings"]) => json_ok(&mut stream, manage::settings_get()),
         ("POST", ["api", "settings"]) => reply(&mut stream, body_json(&req).and_then(|b| manage::settings_set(&shared, &b))),
         ("GET", ["api", "php"]) => json_ok(&mut stream, manage::php_get()),
+        ("GET", ["api", "php", "pecl"]) => reply(&mut stream, manage::pecl_catalog()),
         ("POST", ["api", "php", minor]) => reply(&mut stream, body_json(&req).and_then(|b| manage::php_set(&shared, minor, &b))),
         ("GET", ["api", "services"]) => json_ok(&mut stream, manage::services_get()),
         ("POST", ["api", "service", name]) => reply(&mut stream, body_json(&req).and_then(|b| manage::service_set(&shared, name, &b))),
@@ -234,8 +229,15 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
             let text = manage::job_log(id.parse().unwrap_or(0));
             respond(&mut stream, 200, "text/plain; charset=utf-8", text.as_bytes());
         }
-        ("GET", ["api", "github"]) => json_ok(&mut stream, manage::github_status()),
-        ("GET", ["api", "github", "repos", owner]) => reply(&mut stream, manage::github_repos(owner)),
+        ("GET", ["api", "github"]) => {
+            let account = query_param(&req.query, "account");
+            json_ok(&mut stream, manage::github_status(account.as_deref()))
+        }
+        ("GET", ["api", "github", "identities"]) => json_ok(&mut stream, manage::identities()),
+        ("GET", ["api", "github", "repos", owner]) => {
+            let account = query_param(&req.query, "account");
+            reply(&mut stream, manage::github_repos(owner, account.as_deref()))
+        }
         ("POST", ["api", "github", "login"]) => reply(&mut stream, body_json(&req).and_then(|b| manage::github_login(b["token"].as_str().unwrap_or_default()))),
         ("POST", ["api", "shutdown"]) => {
             json_ok(&mut stream, json!({ "ok": true }));

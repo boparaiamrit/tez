@@ -46,6 +46,8 @@ pub struct SiteSettings {
     pub up: bool,
     /// Turn single processes on or off ("schedule": true, "vite": false), over what tez detects.
     pub processes: BTreeMap<String, bool>,
+    /// Extra host names this site answers on (multi-domain apps): "admin.local.example.com".
+    pub domains: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

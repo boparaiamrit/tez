@@ -112,8 +112,31 @@ pub fn php_get() -> Value {
     json!({ "versions": versions, "catalog": catalog, "all": cfg.php_ini, "available": php::MINORS })
 }
 
-/// body: { "settings": { key: value | null }, "extensions": { name: true|false } }
+/// Every extension PECL publishes Windows builds for (cached for a day).
+pub fn pecl_catalog() -> R<Value> {
+    let cache = paths::cache_dir().join("pecl-index.json");
+    let fresh = cache.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() < 86_400).unwrap_or(false)).unwrap_or(false);
+    if fresh { if let Ok(t) = std::fs::read_to_string(&cache) { if let Ok(v) = serde_json::from_str(&t) { return Ok(v); } } }
+    let html = crate::fetch::get_text("https://downloads.php.net/~windows/pecl/releases/")?;
+    let mut names: Vec<String> = crate::fetch::hrefs(&html).into_iter()
+        .filter_map(|h| h.strip_suffix('/').map(|s| s.to_string()))
+        .filter(|s| !s.is_empty() && !s.starts_with('.') && !s.contains('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .collect();
+    names.sort();
+    names.dedup();
+    let v = json!({ "extensions": names });
+    let _ = std::fs::write(&cache, v.to_string());
+    Ok(v)
+}
+
+/// body: { "settings": { key: value | null }, "extensions": { name: true|false }, "install": "imagick" }
 pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
+    if let Some(ext) = body["install"].as_str() {
+        if !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { bail!("bad extension name"); }
+        let target = if minor == "all" { "all".to_string() } else { php::normalize(minor)? };
+        let id = start_job(&["ext".into(), "install".into(), ext.into(), "--php".into(), target.clone()], None, &format!("Install {ext} for PHP {target}"))?;
+        return Ok(json!({ "ok": true, "job": id }));
+    }
     let mut cfg = Config::load();
     let all = minor == "all";
     let minor = if all { "all".to_string() } else { php::normalize(minor)? };
@@ -161,27 +184,49 @@ pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
 
 // ------------------------------------------------------------------ services
 
+/// Every configured instance, plus one row for each service not set up yet.
+pub fn service_instances(cfg: &Config) -> Vec<Value> {
+    let mut out = Vec::new();
+    for i in services::CATALOG {
+        let mut keys: Vec<String> = cfg.services.keys().filter(|k| services::kind(k) == i.name).cloned().collect();
+        let configured = !keys.is_empty();
+        if !configured { keys.push(i.name.to_string()); }
+        for key in keys {
+            let sc = cfg.services.get(&key).cloned().unwrap_or_default();
+            let version = services::version_of(&key, &sc);
+            let port = services::port_of(&key, &sc);
+            let full = std::fs::read_to_string(services::dir(&key, &version).join(".tez-version")).unwrap_or_else(|_| version.clone());
+            let options: Vec<Value> = services::options_for(&key).iter().map(|(k, d, about)| json!({
+                "key": k, "default": d, "about": about, "value": sc.options.get(*k).cloned().unwrap_or_else(|| d.to_string()),
+                "secret": k.contains("key") || k.contains("password"),
+            })).collect();
+            let title = if key.contains('@') { format!("{} {}", i.title, services::series(&key, &version)) } else { i.title.to_string() };
+            let mut v = json!({
+                "name": key, "kind": i.name, "title": title, "about": i.about, "version": version, "full_version": full.trim(), "port": port,
+                "installed": services::is_installed(&key, &version), "enabled": configured && sc.enabled,
+                "options": options, "env": env_snippet(&key, port, &sc), "versions": i.versions,
+            });
+            if i.name == "postgres" {
+                v["extensions"] = json!(services::pg_extensions_installed(&services::series("postgres", &version)));
+                v["extension_catalog"] = json!(services::PG_EXTENSIONS);
+            }
+            out.push(v);
+        }
+    }
+    out
+}
+
 pub fn services_get() -> Value {
     let cfg = Config::load();
-    let list: Vec<Value> = services::CATALOG.iter().map(|i| {
-        let sc = cfg.services.get(i.name).cloned().unwrap_or_default();
-        let version = if sc.version.is_empty() { i.version.to_string() } else { sc.version.clone() };
-        let port = if sc.port == 0 { i.port } else { sc.port };
-        let options: Vec<Value> = services::options_for(i.name).iter().map(|(k, d, about)| json!({
-            "key": k, "default": d, "about": about, "value": sc.options.get(*k).cloned().unwrap_or_else(|| d.to_string()),
-            "secret": k.contains("key") || k.contains("password"),
-        })).collect();
-        json!({ "name": i.name, "title": i.title, "about": i.about, "version": version, "port": port,
-                "installed": services::is_installed(i.name, &version), "enabled": cfg.services.get(i.name).map(|s| s.enabled).unwrap_or(false),
-                "options": options, "env": env_snippet(i.name, port, &sc) })
-    }).collect();
-    json!({ "services": list })
+    json!({ "services": service_instances(&cfg) })
 }
 
 fn env_snippet(name: &str, port: u16, sc: &services_cfg::ServiceConfig) -> Vec<(String, String)> {
     let p = port.to_string();
     let v = |a: &str, b: &str| (a.to_string(), b.to_string());
-    match name {
+    match services::kind(name) {
+        "mysql" | "mariadb" => vec![v("DB_CONNECTION", if services::kind(name) == "mariadb" { "mariadb" } else { "mysql" }), v("DB_HOST", "127.0.0.1"), v("DB_PORT", &p), v("DB_USERNAME", "root"), v("DB_PASSWORD", "")],
+        "mongodb" => vec![v("MONGODB_URI", &format!("mongodb://127.0.0.1:{p}"))],
         "postgres" => vec![v("DB_CONNECTION", "pgsql"), v("DB_HOST", "127.0.0.1"), v("DB_PORT", &p), v("DB_USERNAME", "postgres"), v("DB_PASSWORD", "")],
         "redis" => vec![v("REDIS_CLIENT", "phpredis"), v("REDIS_HOST", "127.0.0.1"), v("REDIS_PORT", &p), v("REDIS_PASSWORD", "null")],
         "mailpit" => vec![v("MAIL_MAILER", "smtp"), v("MAIL_HOST", "127.0.0.1"), v("MAIL_PORT", &p), v("MAIL_ENCRYPTION", "null")],
@@ -196,6 +241,21 @@ mod services_cfg { pub use crate::config::ServiceConfig; }
 /// body: { enabled?, port?, version?, options?: { key: value|null } }
 pub fn service_set(shared: &Shared, name: &str, body: &Value) -> R<Value> {
     services::info(name)?;
+    // Installing a version or an extension takes a while: run it as a job with a log.
+    if let Some(v) = body["install"].as_str() {
+        let id = start_job(&["service".into(), "install".into(), services::kind(name).into(), v.into()], None, &format!("Install {} {v}", services::info(name)?.title))?;
+        return Ok(json!({ "ok": true, "job": id }));
+    }
+    if let Some(ext) = body["extension"].as_str() {
+        let cfg = Config::load();
+        let pg = services::version_of(name, &cfg.services.get(name).cloned().unwrap_or_default());
+        let mut args: Vec<String> = vec!["pg".into(), "ext".into(), "install".into(), ext.into()];
+        if let Some(v) = body["extension_version"].as_str().filter(|s| !s.is_empty()) { args.push(v.into()); }
+        args.push("--pg".into());
+        args.push(pg.clone());
+        let id = start_job(&args, None, &format!("Add {ext} to PostgreSQL {pg}"))?;
+        return Ok(json!({ "ok": true, "job": id }));
+    }
     let mut cfg = Config::load();
     let e = cfg.services.entry(name.to_string()).or_default();
     if let Some(v) = body["enabled"].as_bool() { e.enabled = v; }
@@ -250,7 +310,7 @@ pub fn site_get(name: &str) -> R<Value> {
         v.sort(); v
     }).unwrap_or_default();
     Ok(json!({
-        "name": s.name, "path": s.path, "php": s.php, "isolated": s.settings.php.is_some(), "up": s.settings.up,
+        "name": s.name, "path": s.path, "php": s.php, "isolated": s.settings.php.is_some(), "up": s.settings.up, "domains": s.settings.domains,
         "url": s.url(&cfg), "laravel": s.laravel, "linked": s.linked, "processes": procs,
         "config_files": files, "env": env_groups(&s.path), "has_vendor": s.path.join("vendor").exists(),
         "has_node_modules": s.path.join("node_modules").exists(),
@@ -305,6 +365,16 @@ pub fn site_set(shared: &Shared, name: &str, body: &Value) -> R<Value> {
         entry.php = match body["php"].as_str() { Some(v) if !v.is_empty() => Some(php::normalize(v)?), _ => None };
     }
     if let Some(v) = body["up"].as_bool() { entry.up = v; }
+    if let Some(list) = body["domains"].as_array() {
+        let mut ds: Vec<String> = Vec::new();
+        for d in list.iter().filter_map(|x| x.as_str()) {
+            let d = d.trim().to_ascii_lowercase();
+            if d.is_empty() { continue; }
+            if d.contains(['/', ' ', ',', '{', '}']) { bail!("'{d}' is not a host name"); }
+            if !ds.contains(&d) { ds.push(d); }
+        }
+        entry.domains = ds;
+    }
     if let Some(map) = body["processes"].as_object() {
         for (k, v) in map {
             match v.as_bool() { Some(b) => { entry.processes.insert(k.clone(), b); } None => { entry.processes.remove(k); } }
@@ -398,7 +468,7 @@ static JOBS: Mutex<Vec<JobRec>> = Mutex::new(Vec::new());
 
 /// Run a tez command in the background with its output in a log. Only tez's own commands.
 pub fn start_job(args: &[String], cwd: Option<&Path>, title: &str) -> R<u32> {
-    const ALLOWED: &[&str] = &["php", "service", "ext", "clone", "setup", "db", "adopt", "import", "composer", "npm", "artisan", "doctor", "trust", "hosts"];
+    const ALLOWED: &[&str] = &["php", "service", "pg", "ext", "clone", "setup", "db", "adopt", "import", "composer", "npm", "artisan", "doctor", "trust", "hosts"];
     let first = args.first().map(|s| s.as_str()).unwrap_or_default();
     if !ALLOWED.contains(&first) { bail!("'{first}' cannot be run from the dashboard"); }
     let mut jobs = JOBS.lock().unwrap();
@@ -463,6 +533,111 @@ pub fn job_start(body: &Value) -> R<Value> {
 
 // ------------------------------------------------------------------ GitHub
 
+/// One gh login (gh supports several accounts per host).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GhAccount { pub host: String, pub login: String, pub active: bool, pub protocol: String }
+
+pub fn gh_accounts() -> Vec<GhAccount> {
+    let out = Command::new("gh").args(["auth", "status"]).creation_flags(crate::win::CREATE_NO_WINDOW).output();
+    let Ok(out) = out else { return Vec::new() };
+    // gh prints this on stdout or stderr depending on version.
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let mut accounts: Vec<GhAccount> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.split_once("Logged in to ").map(|(_, r)| r) {
+            let mut parts = rest.split_whitespace();
+            let host = parts.next().unwrap_or("github.com").to_string();
+            let login = rest.split(" account ").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or("").to_string();
+            accounts.push(GhAccount { host, login, active: false, protocol: "https".into() });
+        } else if let Some(v) = t.strip_prefix("- Active account:") {
+            if let Some(a) = accounts.last_mut() { a.active = v.trim() == "true"; }
+        } else if let Some(v) = t.strip_prefix("- Git operations protocol:") {
+            if let Some(a) = accounts.last_mut() { a.protocol = v.trim().to_string(); }
+        }
+    }
+    accounts
+}
+
+/// A `Host` entry from ~/.ssh/config: an alias git can clone through (`git@alias:owner/repo`).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SshHost { pub alias: String, pub hostname: String, pub user: String, pub identity: String, pub key_exists: bool }
+
+pub fn ssh_hosts() -> Vec<SshHost> {
+    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    let text = std::fs::read_to_string(home.join(".ssh").join("config")).unwrap_or_default();
+    let mut hosts: Vec<SshHost> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.is_empty() { continue; }
+        let (k, v) = match t.split_once(|c: char| c.is_whitespace() || c == '=') { Some((k, v)) => (k.to_ascii_lowercase(), v.trim().trim_start_matches('=').trim().to_string()), None => continue };
+        match k.as_str() {
+            "host" => {
+                for alias in v.split_whitespace().filter(|a| !a.contains('*') && !a.contains('?') && !a.starts_with('!')) {
+                    hosts.push(SshHost { alias: alias.to_string(), hostname: alias.to_string(), user: "git".into(), identity: String::new(), key_exists: false });
+                }
+            }
+            "hostname" => if let Some(h) = hosts.last_mut() { h.hostname = v; },
+            "user" => if let Some(h) = hosts.last_mut() { h.user = v; },
+            "identityfile" => if let Some(h) = hosts.last_mut() {
+                let p = v.trim_matches('"').replacen("~", &home.display().to_string(), 1).replace('/', "\\");
+                h.key_exists = Path::new(&p).exists();
+                h.identity = p;
+            },
+            _ => {}
+        }
+    }
+    // github.com itself, with the default key, when the config does not name it.
+    if !hosts.iter().any(|h| h.alias == "github.com") {
+        let key = ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|k| home.join(".ssh").join(k)).find(|p| p.exists());
+        if let Some(k) = key {
+            hosts.insert(0, SshHost { alias: "github.com".into(), hostname: "github.com".into(), user: "git".into(), identity: k.display().to_string(), key_exists: true });
+        }
+    }
+    hosts
+}
+
+/// The clone route for an account: its own SSH alias when one is configured (the alias name
+/// mentions the login, as in github.com-<login>), else plain github.com over SSH or gh's HTTPS.
+pub fn route_for(account: &GhAccount, hosts: &[SshHost]) -> String {
+    if account.protocol == "ssh" {
+        if let Some(h) = hosts.iter().find(|h| h.hostname == account.host && h.alias != account.host && h.alias.contains(&account.login)) {
+            return format!("ssh:{}", h.alias);
+        }
+        // The default key belongs to the account no alias claims.
+        if hosts.iter().any(|h| h.alias == account.host) { return format!("ssh:{}", account.host); }
+    }
+    format!("gh:{}", account.login)
+}
+
+pub fn identities() -> Value {
+    let accounts = gh_accounts();
+    let hosts = ssh_hosts();
+    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    let keys: Vec<String> = std::fs::read_dir(home.join(".ssh")).map(|rd| rd.flatten()
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .filter(|n| n.ends_with(".pub")).collect()).unwrap_or_default();
+    let routes: Vec<Value> = accounts.iter().map(|a| json!({ "login": a.login, "route": route_for(a, &hosts) })).collect();
+    json!({ "accounts": accounts, "ssh_hosts": hosts, "public_keys": keys, "routes": routes })
+}
+
+/// gh for one specific account: its token is handed to gh through GH_TOKEN, never to the UI.
+fn gh_as(account: Option<&str>, args: &[&str]) -> R<String> {
+    let token = match account {
+        Some(login) if !login.is_empty() => {
+            if !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { bail!("bad account name"); }
+            Some(gh(&["auth", "token", "--hostname", "github.com", "--user", login], None)?.trim().to_string())
+        }
+        _ => None,
+    };
+    let mut cmd = Command::new("gh");
+    cmd.args(args).creation_flags(crate::win::CREATE_NO_WINDOW).stdin(Stdio::null());
+    if let Some(t) = token { cmd.env("GH_TOKEN", t); }
+    let out = cmd.output().map_err(|_| "GitHub CLI (gh) is not installed: winget install GitHub.cli".to_string())?;
+    if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 fn gh(args: &[&str], stdin: Option<&str>) -> R<String> {
     let mut cmd = Command::new("gh");
     cmd.args(args).creation_flags(crate::win::CREATE_NO_WINDOW).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -477,19 +652,21 @@ fn gh(args: &[&str], stdin: Option<&str>) -> R<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-pub fn github_status() -> Value {
-    match gh(&["api", "user", "--jq", ".login"], None) {
+/// The signed-in user and the organisations they can see, for one gh account (or the active one).
+pub fn github_status(account: Option<&str>) -> Value {
+    match gh_as(account, &["api", "user", "--jq", ".login"]) {
         Ok(login) => {
-            let orgs: Vec<String> = gh(&["api", "user/orgs", "--paginate", "--jq", ".[].login"], None).unwrap_or_default().lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            json!({ "ok": true, "login": login.trim(), "owners": std::iter::once(login.trim().to_string()).chain(orgs).collect::<Vec<_>>() })
+            let orgs: Vec<String> = gh_as(account, &["api", "user/orgs", "--paginate", "--jq", ".[].login"]).unwrap_or_default()
+                .lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            json!({ "ok": true, "login": login.trim(), "owners": std::iter::once(login.trim().to_string()).chain(orgs).collect::<Vec<_>>(), "identities": identities() })
         }
-        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => json!({ "ok": false, "error": e.to_string(), "identities": identities() }),
     }
 }
 
-pub fn github_repos(owner: &str) -> R<Value> {
+pub fn github_repos(owner: &str, account: Option<&str>) -> R<Value> {
     if !owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') { bail!("bad owner"); }
-    let out = gh(&["repo", "list", owner, "--limit", "300", "--json", "name,nameWithOwner,description,isPrivate,updatedAt,primaryLanguage,isArchived"], None)?;
+    let out = gh_as(account, &["repo", "list", owner, "--limit", "300", "--json", "name,nameWithOwner,description,isPrivate,updatedAt,primaryLanguage,isArchived,sshUrl,url"])?;
     let v: Value = serde_json::from_str(&out)?;
     Ok(json!({ "repos": v }))
 }
@@ -499,5 +676,5 @@ pub fn github_login(token: &str) -> R<Value> {
     let t = token.trim();
     if t.is_empty() || t.contains(char::is_whitespace) { bail!("paste a GitHub token (it starts with ghp_ or github_pat_)"); }
     gh(&["auth", "login", "--with-token", "--hostname", "github.com"], Some(t))?;
-    Ok(github_status())
+    Ok(github_status(None))
 }
