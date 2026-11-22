@@ -358,6 +358,9 @@ mod tests {
         assert_eq!((m.as_str(), u.as_str(), s), ("GET", "/login?x=1", 200));
         assert!((ms - 12.0).abs() < 0.01);
         assert!((ts - 1795330000.25).abs() < 0.001);
+        // A connection that sent no request: Nginx logs a 400 with empty fields; not a request.
+        let empty = r#"{"ts":1795337320.109,"request":{"remote_ip":"127.0.0.1","proto":"","method":"","host":"a.test","uri":""},"duration":1.008,"size":0,"status":400}"#;
+        assert!(crate::stats::parse_access(empty).is_none());
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["request"]["host"], "acmeshop.localhost");
     }

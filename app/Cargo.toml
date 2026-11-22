@@ -1,6 +1,6 @@
 [package]
 name = "tez-app"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "The tez desktop app: a native GPUI Kit window and tray icon for the tez daemon."
 license = "MIT"

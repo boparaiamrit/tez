@@ -105,11 +105,13 @@ pub fn route(path: &str) -> String {
     if r.is_empty() { "/".into() } else { r }
 }
 
-/// One Caddy JSON access-log line: (unix time, method, uri, status, ms).
+/// One JSON access-log line, Caddy's or Nginx's: (unix time, method, uri, status, ms).
+/// A connection that closed before sending a request (Nginx logs it as a 400 with no method)
+/// is not a request, so it is skipped rather than counted as a slow one.
 pub fn parse_access(line: &str) -> Option<(f64, String, String, u16, f64)> {
     let v: Value = serde_json::from_str(line).ok()?;
     let req = &v["request"];
-    let method = req["method"].as_str()?.to_string();
+    let method = req["method"].as_str().filter(|m| !m.is_empty())?.to_string();
     let uri = req["uri"].as_str()?.to_string();
     let status = v["status"].as_u64()? as u16;
     let secs = v["duration"].as_f64().unwrap_or(0.0);
