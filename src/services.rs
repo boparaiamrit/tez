@@ -205,48 +205,75 @@ fn postgres_full_version(v: &str) -> R<String> {
     bail!("no PostgreSQL {major} build found at EnterpriseDB")
 }
 
-/// Newest production MongoDB in a series, from MongoDB's own release catalog.
-fn mongodb_release(series: &str) -> R<(String, String)> {
-    let body = fetch::get_text("https://downloads.mongodb.org/full.json")?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
-    // MongoDB's names for this machine: (target, arch, edition).
-    let (target, arch, edition) = match sys::os() {
+/// A full version ("7.0.14") rather than a series ("7.0").
+fn is_exact(version: &str) -> bool { version.split('.').count() >= 3 }
+
+/// What to ask a resolver for: the exact version when one was given, else the series.
+fn spec_for(k: &str, version: &str) -> String { if is_exact(version) { version.to_string() } else { series(k, version) } }
+
+/// MongoDB's names for this machine: (target, arch, edition).
+fn mongodb_target() -> R<(String, &'static str, &'static str)> {
+    Ok(match sys::os() {
         "windows" => ("windows".to_string(), "x86_64", "base"),
         "macos" => ("macos".to_string(), if sys::arch() == "aarch64" { "arm64" } else { "x86_64" }, "base"),
         _ => (linux_mongodb_target().ok_or("MongoDB has builds for Ubuntu, Debian, RHEL and Amazon Linux only")?, sys::arch(), "targeted"),
-    };
+    })
+}
+
+fn mongodb_catalog() -> R<serde_json::Value> {
+    let body = fetch::get_text("https://downloads.mongodb.org/full.json")?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+/// The archive URL of one MongoDB release for this machine, if it has one.
+fn mongodb_url(v: &serde_json::Value, target: &str, arch: &str, edition: &str) -> Option<String> {
+    v["downloads"].as_array().into_iter().flatten()
+        .find(|d| d["target"] == target && d["arch"] == arch && d["edition"] == edition)
+        .and_then(|d| d["archive"]["url"].as_str()).map(|s| s.to_string())
+}
+
+/// A MongoDB release from MongoDB's own catalog: the newest production release of a series
+/// ("8.0"), or exactly the version asked for ("8.0.12").
+fn mongodb_release(spec: &str) -> R<(String, String)> {
+    let json = mongodb_catalog()?;
+    let (target, arch, edition) = mongodb_target()?;
+    let exact = is_exact(spec);
     let mut best: Option<(String, String)> = None;
     for v in json["versions"].as_array().into_iter().flatten() {
         let ver = v["version"].as_str().unwrap_or_default();
-        if !v["production_release"].as_bool().unwrap_or(false) || !ver.starts_with(&format!("{series}.")) { continue; }
-        let url = v["downloads"].as_array().into_iter().flatten()
-            .find(|d| d["target"] == target.as_str() && d["arch"] == arch && d["edition"] == edition)
-            .and_then(|d| d["archive"]["url"].as_str()).map(|s| s.to_string());
-        if let Some(url) = url {
+        let wanted = if exact { ver == spec } else { v["production_release"].as_bool().unwrap_or(false) && ver.starts_with(&format!("{spec}.")) };
+        if !wanted { continue; }
+        if let Some(url) = mongodb_url(v, &target, arch, edition) {
             if best.as_ref().map(|(b, _)| util::cmp_version(ver, b) == std::cmp::Ordering::Greater).unwrap_or(true) { best = Some((ver.to_string(), url)); }
         }
     }
-    best.ok_or_else(|| format!("no {target} {arch} build of MongoDB {series}").into())
+    best.ok_or_else(|| format!("no {target} {arch} build of MongoDB {spec}").into())
 }
 
-/// Newest MariaDB in a series, from MariaDB's download API.
-fn mariadb_release(series: &str) -> R<(String, String)> {
-    let body = fetch::get_text(&format!("https://downloads.mariadb.org/rest-api/mariadb/{series}/latest/"))?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
+/// The download URL of one MariaDB release for this machine, from its REST record.
+fn mariadb_file(ver: &str, rel: &serde_json::Value) -> Option<String> {
+    for f in rel["files"].as_array().into_iter().flatten() {
+        let name = f["file_name"].as_str().unwrap_or_default();
+        let wanted = if cfg!(windows) { name.ends_with("-winx64.zip") }
+            else { name.starts_with(&format!("mariadb-{ver}-")) && name.ends_with("-linux-systemd-x86_64.tar.gz") };
+        if wanted { return Some(f["file_download_url"].as_str().unwrap_or_default().replace("http://", "https://")); }
+    }
+    None
+}
+
+/// A MariaDB release from MariaDB's download API: the newest of a series ("11.4"), or exactly
+/// the version asked for ("11.4.5").
+fn mariadb_release(spec: &str) -> R<(String, String)> {
+    let series: String = spec.split('.').take(2).collect::<Vec<_>>().join(".");
+    let url = if is_exact(spec) { format!("https://downloads.mariadb.org/rest-api/mariadb/{series}/") } else { format!("https://downloads.mariadb.org/rest-api/mariadb/{series}/latest/") };
+    let json: serde_json::Value = serde_json::from_str(&fetch::get_text(&url)?)?;
     if let Some(rels) = json["releases"].as_object() {
         for (ver, rel) in rels {
-            for f in rel["files"].as_array().into_iter().flatten() {
-                let name = f["file_name"].as_str().unwrap_or_default();
-                let wanted = if cfg!(windows) { name.ends_with("-winx64.zip") }
-                    else { name.starts_with(&format!("mariadb-{ver}-")) && name.ends_with("-linux-systemd-x86_64.tar.gz") };
-                if wanted {
-                    let url = f["file_download_url"].as_str().unwrap_or_default().replace("http://", "https://");
-                    return Ok((ver.clone(), url));
-                }
-            }
+            if is_exact(spec) && ver != spec { continue; }
+            if let Some(url) = mariadb_file(ver, rel) { return Ok((ver.clone(), url)); }
         }
     }
-    bail!("no {} build of MariaDB {series}", sys::os())
+    bail!("no {} build of MariaDB {spec}", sys::os())
 }
 
 /// MySQL's archive names for a version on this machine (newest macOS first).
@@ -261,16 +288,32 @@ fn mysql_files(ver: &str) -> Vec<String> {
     }
 }
 
-/// Newest MySQL patch in a series (dev.mysql.com has no catalog, so probe).
-fn mysql_release(series: &str) -> R<(String, String)> {
+/// Where one MySQL version can be downloaded for this machine: the current downloads, else the
+/// archives (downloads.mysql.com keeps every release).
+fn mysql_url(ver: &str) -> Option<String> {
+    let series: String = ver.split('.').take(2).collect::<Vec<_>>().join(".");
+    for file in mysql_files(ver) {
+        for url in [format!("https://dev.mysql.com/get/Downloads/MySQL-{series}/{file}"), format!("https://downloads.mysql.com/archives/get/p/23/file/{file}")] {
+            if fetch::exists(&url) { return Some(url); }
+        }
+    }
+    None
+}
+
+/// A MySQL release: the newest patch of a series ("8.4"), or exactly the version asked for
+/// ("8.0.40"). dev.mysql.com has no catalog, so probe.
+fn mysql_release(spec: &str) -> R<(String, String)> {
+    if is_exact(spec) {
+        return mysql_url(spec).map(|u| (spec.to_string(), u)).ok_or_else(|| format!("no {} build of MySQL {spec}", sys::os()).into());
+    }
     for n in (0..=50).rev() {
-        let ver = format!("{series}.{n}");
+        let ver = format!("{spec}.{n}");
         for file in mysql_files(&ver) {
-            let url = format!("https://dev.mysql.com/get/Downloads/MySQL-{series}/{file}");
+            let url = format!("https://dev.mysql.com/get/Downloads/MySQL-{spec}/{file}");
             if fetch::exists(&url) { return Ok((ver, url)); }
         }
     }
-    bail!("no {} build of MySQL {series}", sys::os())
+    bail!("no {} build of MySQL {spec}", sys::os())
 }
 
 /// The file name at the end of a URL, for the download cache.
@@ -326,12 +369,54 @@ fn asset_names(version: &str) -> (String, String, String) {
 
 // ------------------------------------------------------------------ install
 
+/// The full version installed in a service's folder (".tez-version"), if any.
+pub fn installed_full(name: &str, version: &str) -> Option<String> {
+    std::fs::read_to_string(dir(name, version).join(".tez-version")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Download and set up a service version. Returns the version to store in the config.
+///
+/// An exact version ("7.0.14", "17.4") of a series that already has a folder with another
+/// version replaces that folder; data folders are separate and stay. PostgreSQL extensions
+/// that were added to the old folder are added again.
 pub fn install(name: &str, version: Option<&str>) -> R<String> {
     let info = info(name)?;
     let k = kind(name);
+    let want = version.unwrap_or(info.version).trim_start_matches('v').to_string();
+    let d = dir(k, &want);
+    let exact = if k == "postgres" { want.contains('.') } else { is_exact(&want) };
+    let current = installed_full(k, &want);
+    let replacing = matches!(k, "postgres" | "mysql" | "mariadb" | "mongodb") && exact && d.exists()
+        && current.as_deref().map(|c| c.trim_end_matches(".0") != want.trim_end_matches(".0")).unwrap_or(true);
+    if !replacing { return install_inner(name, &want); }
+    let pg_exts: Vec<(String, String)> = if k == "postgres" { pg_extensions_installed(&series(k, &want)) } else { Vec::new() };
+    let ts_versions = if k == "postgres" { timescale_versions(&d) } else { Vec::new() };
+    let old = d.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(&d, &old).map_err(|e| format!("{} {} is in use; stop it first ({e})", info.title, series(k, &want)))?;
+    match install_inner(name, &want) {
+        Ok(v) => {
+            let _ = std::fs::remove_dir_all(&old);
+            let major = series(k, &want);
+            for t in ts_versions { if let Err(e) = install_pg_extension(&major, "timescaledb", Some(&t)) { util::warn(&format!("TimescaleDB {t}: {e}")); } }
+            for (ext, ver) in pg_exts.into_iter().filter(|(e, _)| e != "timescaledb") {
+                if let Err(e) = install_pg_extension(&major, &ext, Some(&ver)) { util::warn(&format!("{ext} {ver}: {e}")); }
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&d);
+            let _ = std::fs::rename(&old, &d);
+            Err(e)
+        }
+    }
+}
+
+fn install_inner(name: &str, version: &str) -> R<String> {
+    let info = info(name)?;
+    let k = kind(name);
     available(k)?;
-    let version = version.unwrap_or(info.version).trim_start_matches('v').to_string();
+    let version = version.to_string();
     let d = dir(k, &version);
     let win = cfg!(windows);
     let stored = match k {
@@ -370,7 +455,7 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
             return Ok(major);
         }
         "mongodb" => {
-            let (full, url) = mongodb_release(&series(k, &version))?;
+            let (full, url) = mongodb_release(&spec_for(k, &version))?;
             util::step(&format!("Downloading MongoDB {full}"));
             let cached = if win { format!("mongodb-windows-x86_64-{full}.zip") } else { url_file(&url) };
             let zip = fetch::download(&url, &cached)?;
@@ -379,7 +464,7 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
             series(k, &full)
         }
         "mariadb" => {
-            let (full, url) = mariadb_release(&series(k, &version))?;
+            let (full, url) = mariadb_release(&spec_for(k, &version))?;
             util::step(&format!("Downloading MariaDB {full}"));
             let cached = if win { format!("mariadb-{full}-winx64.zip") } else { url_file(&url) };
             let zip = fetch::download(&url, &cached)?;
@@ -389,7 +474,7 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
             series(k, &full)
         }
         "mysql" => {
-            let (full, url) = mysql_release(&series(k, &version))?;
+            let (full, url) = mysql_release(&spec_for(k, &version))?;
             util::step(&format!("Downloading MySQL {full}"));
             let cached = if win { format!("mysql-{full}-winx64.zip") } else { url_file(&url) };
             let zip = fetch::download(&url, &cached)?;
@@ -525,7 +610,7 @@ fn copy_tree(src: &Path, dest: &Path) -> R<()> {
     Ok(())
 }
 
-fn timescale_versions(pg: &Path) -> Vec<String> {
+pub fn timescale_versions(pg: &Path) -> Vec<String> {
     std::fs::read_to_string(pg.join(".tez-timescale")).unwrap_or_default().lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
@@ -560,25 +645,32 @@ pub fn install_pg_extension(major: &str, ext: &str, version: Option<&str>) -> R<
             v
         }
         "postgis" => {
-            let listing = fetch::get_text(&format!("https://download.osgeo.org/postgis/windows/pg{major}/"))?;
-            let mut zips: Vec<String> = fetch::hrefs(&listing).into_iter().filter(|h| h.starts_with(&format!("postgis-bundle-pg{major}-")) && h.ends_with("x64.zip")).collect();
-            zips.sort_by(|a, b| util::cmp_version(&a.replace(|c: char| !c.is_ascii_digit() && c != '.', "."), &b.replace(|c: char| !c.is_ascii_digit() && c != '.', ".")));
-            let file = zips.pop().ok_or_else(|| format!("no PostGIS bundle for PostgreSQL {major}"))?;
+            let bundles = postgis_bundles(major)?;
+            let (ver, url) = match version {
+                Some(v) => bundles.into_iter().find(|(b, _)| b == v.trim_start_matches('v')).ok_or_else(|| format!("PostGIS {v} has no Windows bundle for PostgreSQL {major}"))?,
+                None => bundles.into_iter().next().ok_or_else(|| format!("no PostGIS bundle for PostgreSQL {major}"))?,
+            };
+            let file = url_file(&url);
             util::step(&format!("Downloading {file}"));
-            let zip = fetch::download(&format!("https://download.osgeo.org/postgis/windows/pg{major}/{file}"), &file)?;
+            let zip = fetch::download(&url, &file)?;
             fetch::extract(&zip, &tmp, &[])?;
             let entries: Vec<_> = std::fs::read_dir(&tmp)?.flatten().collect();
             let root = if entries.len() == 1 && entries[0].path().is_dir() { entries[0].path() } else { tmp.clone() };
             copy_tree(&root, &pg)?;
-            file.trim_start_matches(&format!("postgis-bundle-pg{major}-")).trim_end_matches("x64.zip").to_string()
+            ver
         }
         "pgvector" | "vector" => {
-            let tag = match version { Some(v) => v.to_string(), None => fetch::github_latest_tag("andreiramani/pgvector_pgsql_windows")? };
-            let file = format!("vector.v{tag}-pg{major}.zip");
-            let zip = fetch::download(&format!("https://github.com/andreiramani/pgvector_pgsql_windows/releases/download/{tag}/{file}"), &file)?;
+            // Releases are tagged per PostgreSQL major ("0.8.6_17"), each with vector.v0.8.6-pg17.zip.
+            let ver = match version {
+                Some(v) => v.split('_').next().unwrap_or(v).trim_start_matches('v').to_string(),
+                None => pgvector_versions(major)?.into_iter().next().ok_or_else(|| format!("no pgvector build for PostgreSQL {major}"))?,
+            };
+            let file = format!("vector.v{ver}-pg{major}.zip");
+            let zip = fetch::download(&format!("https://github.com/{PGVECTOR}/releases/download/{ver}_{major}/{file}"), &file)
+                .map_err(|_| format!("pgvector {ver} has no Windows build for PostgreSQL {major}"))?;
             fetch::extract(&zip, &tmp, &[])?;
             place_by_type(&tmp, &pg)?;
-            tag
+            ver
         }
         _ => bail!("tez can add {}; every build already has the contrib extensions (pgcrypto, hstore, citext, pg_trgm, uuid-ossp...)", PG_EXTENSIONS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")),
     };
@@ -600,6 +692,178 @@ fn place_by_type(src: &Path, pg: &Path) -> R<()> {
         else if n.ends_with(".control") || n.ends_with(".sql") { std::fs::copy(&p, pg.join("share").join("extension").join(&n))?; }
     }
     Ok(())
+}
+
+const PGVECTOR: &str = "andreiramani/pgvector_pgsql_windows";
+const TIMESCALE: &str = "timescale/timescaledb";
+
+/// Every PostGIS bundle for one PostgreSQL major on Windows (current and archived), newest
+/// first: (version, url).
+pub fn postgis_bundles(major: &str) -> R<Vec<(String, String)>> {
+    let base = format!("https://download.osgeo.org/postgis/windows/pg{major}/");
+    let prefix = format!("postgis-bundle-pg{major}-");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for dir in [base.clone(), format!("{base}archive/")] {
+        let Ok(listing) = fetch::get_text(&dir) else { continue };
+        for h in fetch::hrefs(&listing) {
+            let name = h.rsplit('/').next().unwrap_or(&h).to_string();
+            if let Some(ver) = name.strip_prefix(&prefix).and_then(|r| r.strip_suffix("x64.zip")) {
+                if !out.iter().any(|(v, _)| v == ver) { out.push((ver.to_string(), format!("{dir}{name}"))); }
+            }
+        }
+    }
+    if out.is_empty() { bail!("no PostGIS bundle for PostgreSQL {major}"); }
+    out.sort_by(|a, b| util::cmp_version(&b.0, &a.0));
+    Ok(out)
+}
+
+/// pgvector versions with a Windows build for one PostgreSQL major, newest first.
+pub fn pgvector_versions(major: &str) -> R<Vec<String>> {
+    let rels = fetch::github_releases(PGVECTOR, 2)?;
+    let mut out: Vec<String> = rels.iter().filter_map(|r| {
+        let (ver, m) = r.tag.split_once('_')?;
+        (m == major && r.assets.iter().any(|a| a == &format!("vector.v{ver}-pg{major}.zip"))).then(|| ver.to_string())
+    }).collect();
+    out.sort_by(|a, b| util::cmp_version(b, a));
+    out.dedup();
+    Ok(out)
+}
+
+/// One version tez could install for a service on this machine.
+pub struct Offer { pub version: String, pub available: bool, pub reason: String }
+
+fn offer(version: impl Into<String>, available: bool, why: &str) -> Offer {
+    Offer { version: version.into(), available, reason: if available { String::new() } else { why.to_string() } }
+}
+
+/// Every version of a service its publisher lists, newest first, and whether this machine has
+/// a build of it. Full patch versions where the source lists them.
+pub fn offers(kind_name: &str) -> R<Vec<Offer>> {
+    let k = kind(kind_name);
+    let info = info(k)?;
+    let (os, arch) = (sys::os(), sys::arch());
+    let no_build = format!("no {os} {arch} build of this version");
+    let win = cfg!(windows);
+    let mut list: Vec<Offer> = match k {
+        "postgres" => {
+            let rels = fetch::github_releases(THESEUS, 3)?;
+            let triple = theseus_triple();
+            let cands: Vec<(String, String, bool)> = rels.iter().filter(|r| !r.prerelease).filter_map(|r| {
+                let major = r.tag.split('.').next()?.to_string();
+                if !info.versions.contains(&major.as_str()) { return None; }
+                let short = r.tag.split('.').take(2).collect::<Vec<_>>().join(".");
+                let has = r.assets.iter().any(|a| a == &format!("postgresql-{}-{triple}.tar.gz", r.tag));
+                Some((r.tag.clone(), short, has))
+            }).collect();
+            if win {
+                let found = fetch::par_map(&cands, 16, |(_, short, _)| fetch::exists(&edb_url(short)));
+                cands.into_iter().zip(found).map(|((_, short, _), ok)| offer(short, ok, "EnterpriseDB has no Windows zip of this version")).collect()
+            } else {
+                cands.into_iter().map(|(tag, _, has)| offer(tag, has, &no_build)).collect()
+            }
+        }
+        "mysql" => {
+            let mut cands: Vec<String> = Vec::new();
+            for s in info.versions { let max = if *s == "8.0" { 50 } else { 25 }; for n in 0..=max { cands.push(format!("{s}.{n}")); } }
+            let urls = fetch::par_map(&cands, 16, |v| mysql_url(v));
+            cands.into_iter().zip(urls).filter(|(_, u)| u.is_some()).map(|(v, _)| offer(v, true, "")).collect()
+        }
+        "mariadb" => {
+            let json: serde_json::Value = serde_json::from_str(&fetch::get_text("https://downloads.mariadb.org/rest-api/mariadb/")?)?;
+            let majors: Vec<String> = json["major_releases"].as_array().into_iter().flatten()
+                .filter(|m| m["release_status"] == "Stable")
+                .filter_map(|m| m["release_id"].as_str().map(|s| s.to_string()))
+                .filter(|m| util::cmp_version(m, "10.11") != std::cmp::Ordering::Less).collect();
+            let lists = fetch::par_map(&majors, 8, |m| fetch::get_text(&format!("https://downloads.mariadb.org/rest-api/mariadb/{m}/")).ok());
+            let mut out = Vec::new();
+            for body in lists.into_iter().flatten() {
+                let Ok(j) = serde_json::from_str::<serde_json::Value>(&body) else { continue };
+                for (ver, rel) in j["releases"].as_object().into_iter().flatten() {
+                    out.push(offer(ver.clone(), mariadb_file(ver, rel).is_some(), &no_build));
+                }
+            }
+            out
+        }
+        "mongodb" => {
+            let json = mongodb_catalog()?;
+            let target = mongodb_target();
+            json["versions"].as_array().into_iter().flatten()
+                .filter(|v| v["production_release"].as_bool().unwrap_or(false))
+                .filter_map(|v| {
+                    let ver = v["version"].as_str()?.to_string();
+                    if util::cmp_version(&ver, "6.0.0") == std::cmp::Ordering::Less { return None; }
+                    let ok = match &target { Ok((t, a, e)) => mongodb_url(v, t, a, e).is_some(), Err(_) => false };
+                    Some(offer(ver, ok, &no_build))
+                }).collect()
+        }
+        "redis" | "mailpit" | "meilisearch" | "rustfs" => {
+            let repo = match k {
+                "redis" => if win { "redis-windows/redis-windows" } else { "redis/redis" },
+                "mailpit" => "axllent/mailpit",
+                "meilisearch" => "meilisearch/meilisearch",
+                _ => "rustfs/rustfs",
+            };
+            let rels = fetch::github_releases(repo, 1)?;
+            let stable: Vec<&fetch::GhRelease> = rels.iter().filter(|r| !r.prerelease).collect();
+            let pick: Vec<&fetch::GhRelease> = if stable.is_empty() { rels.iter().collect() } else { stable };
+            pick.into_iter().take(15).map(|r| {
+                let v = r.tag.trim_start_matches('v').to_string();
+                let (mp, ms, rf) = asset_names(&v);
+                let asset = match k {
+                    "redis" if win => Some(format!("Redis-{v}-Windows-x64-msys2.zip")),
+                    "redis" => None, // compiled from the source release
+                    "mailpit" => Some(mp),
+                    "meilisearch" => Some(ms),
+                    _ => Some(rf),
+                };
+                let ok = asset.map(|a| r.assets.contains(&a)).unwrap_or(true);
+                offer(v, ok, &no_build)
+            }).collect()
+        }
+        _ => Vec::new(),
+    };
+    if let Err(why) = available(k) { for o in &mut list { o.available = false; o.reason = why.clone(); } }
+    list.sort_by(|a, b| util::cmp_version(&b.version, &a.version));
+    list.dedup_by(|a, b| a.version == b.version);
+    Ok(list)
+}
+
+/// Versions of a PostgreSQL extension for each major: (version, has a build here), newest first.
+pub fn pg_extension_offers(ext: &str, majors: &[String]) -> R<Vec<(String, Vec<(String, bool)>)>> {
+    let win = cfg!(windows);
+    Ok(match ext {
+        "timescaledb" => {
+            let rels = fetch::github_releases(TIMESCALE, 3)?;
+            let rels: Vec<&fetch::GhRelease> = rels.iter().filter(|r| !r.prerelease && r.tag.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)).collect();
+            majors.iter().map(|m| {
+                let asset = format!("timescaledb-postgresql-{m}-windows-amd64.zip");
+                let mut v: Vec<(String, bool)> = if win {
+                    rels.iter().filter(|r| r.assets.contains(&asset)).map(|r| (r.tag.clone(), true)).collect()
+                } else {
+                    rels.iter().take(10).map(|r| (r.tag.clone(), false)).collect()
+                };
+                v.sort_by(|a, b| util::cmp_version(&b.0, &a.0));
+                (m.clone(), v)
+            }).collect()
+        }
+        "postgis" if win => {
+            let lists = fetch::par_map(majors, 6, |m| postgis_bundles(m).unwrap_or_default());
+            majors.iter().cloned().zip(lists).map(|(m, l)| (m, l.into_iter().map(|(v, _)| (v, true)).collect())).collect()
+        }
+        "pgvector" if win => {
+            let rels = fetch::github_releases(PGVECTOR, 2)?;
+            majors.iter().map(|m| {
+                let mut v: Vec<(String, bool)> = rels.iter().filter_map(|r| {
+                    let (ver, mm) = r.tag.split_once('_')?;
+                    (mm == m && r.assets.iter().any(|a| a == &format!("vector.v{ver}-pg{m}.zip"))).then(|| (ver.to_string(), true))
+                }).collect();
+                v.sort_by(|a, b| util::cmp_version(&b.0, &a.0));
+                v.dedup();
+                (m.clone(), v)
+            }).collect()
+        }
+        _ => majors.iter().map(|m| (m.clone(), Vec::new())).collect(),
+    })
 }
 
 pub fn pg_extensions_installed(major: &str) -> Vec<(String, String)> {

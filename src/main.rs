@@ -4,6 +4,7 @@
 //! `composer` (and `exec` on Windows) it is the version-aware PHP, Composer and Horizon shims.
 
 mod api;
+mod catalog;
 mod cli;
 mod config;
 mod daemon;
