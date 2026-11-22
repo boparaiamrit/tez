@@ -12,7 +12,7 @@
 use crate::config::Config;
 use crate::fetch;
 use crate::paths;
-use crate::sys;
+use crate::sys::{self, Hidden};
 use crate::util::{self, R};
 use crate::bail;
 use std::path::{Path, PathBuf};
@@ -136,13 +136,92 @@ pub fn normalize(v: &str) -> R<String> {
     Ok(minor)
 }
 
+/// The Windows build zips windows.php.net lists (current releases and archives): file names.
+fn windows_listings() -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for base in [BASE, ARCHIVES] {
+        if let Ok(html) = fetch::get_text(base) {
+            for h in fetch::hrefs(&html) {
+                let name = h.rsplit('/').next().unwrap_or(&h).to_string();
+                if name.starts_with("php-") && name.ends_with(".zip") { out.push((name, base)); }
+            }
+        }
+    }
+    out
+}
+
+/// "php-8.3.27-nts-Win32-vs16-x64.zip" -> "8.3.27" (only plain x.y.z releases).
+fn windows_zip_version(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("php-")?.strip_suffix("-x64.zip")?;
+    let (ver, tail) = rest.split_once("-nts-Win32-")?;
+    if tail.contains('-') || ver.split('.').count() != 3 || !ver.chars().all(|c| c.is_ascii_digit() || c == '.') { return None; }
+    Some(ver.to_string())
+}
+
+/// Every patch of each PHP version this OS has builds for, newest first.
+pub fn all_versions() -> R<Vec<(String, Vec<String>)>> {
+    let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    if cfg!(windows) {
+        for (name, _) in windows_listings() {
+            if let Some(v) = windows_zip_version(&name) {
+                let minor = v.split('.').take(2).collect::<Vec<_>>().join(".");
+                map.entry(minor).or_default().push(v);
+            }
+        }
+        // releases.json can list a release before the directory listing shows it.
+        for r in windows_releases().unwrap_or_default() { map.entry(r.minor.clone()).or_default().push(r.version); }
+    } else {
+        let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let (os, arch) = static_target();
+        let suffix = format!("-{os}-{arch}.tar.gz");
+        let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
+        for n in &names {
+            let Some(v) = n.strip_prefix("php-").and_then(|r| r.strip_suffix(&suffix)).and_then(|r| r.strip_suffix("-cli")) else { continue };
+            if !names.contains(&format!("php-{v}-fpm{suffix}")) { continue; }
+            map.entry(v.split('.').take(2).collect::<Vec<_>>().join(".")).or_default().push(v.to_string());
+        }
+    }
+    let mut out: Vec<(String, Vec<String>)> = map.into_iter().filter(|(m, _)| MINORS.contains(&m.as_str())).map(|(m, mut v)| {
+        v.sort_by(|a, b| util::cmp_version(b, a));
+        v.dedup();
+        (m, v)
+    }).collect();
+    out.sort_by(|a, b| util::cmp_version(&b.0, &a.0));
+    Ok(out)
+}
+
+/// The build of one exact PHP version ("8.3.27") for this machine.
+fn release_for(minor: &str, version: &str) -> R<Release> {
+    if cfg!(windows) {
+        let current = windows_releases().unwrap_or_default().into_iter().find(|r| r.version == version);
+        if let Some(r) = current { return Ok(r); }
+        let found = windows_listings().into_iter().find(|(n, _)| windows_zip_version(n).as_deref() == Some(version));
+        let Some((zip, _)) = found else { bail!("windows.php.net has no x64 NTS build of PHP {version}") };
+        return Ok(Release { minor: minor.to_string(), version: version.to_string(), zip, sha256: None });
+    }
+    let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let (os, arch) = static_target();
+    let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
+    let cli = format!("php-{version}-cli-{os}-{arch}.tar.gz");
+    if !names.contains(&cli) || !names.contains(&cli.replace("-cli-", "-fpm-")) { bail!("static-php.dev has no {os} {arch} build of PHP {version}"); }
+    Ok(Release { minor: minor.to_string(), version: version.to_string(), zip: cli, sha256: None })
+}
+
 /// Install (or update to the newest patch of) one PHP version.
-pub fn install(minor: &str, cfg: &Config) -> R<String> {
+pub fn install(minor: &str, cfg: &Config) -> R<String> { install_version(minor, None, cfg) }
+
+/// Install one PHP version: the newest patch, or exactly `version` ("8.3.27").
+pub fn install_version(minor: &str, version: Option<&str>, cfg: &Config) -> R<String> {
     if !available_minors().contains(&minor) {
         bail!("PHP {minor} has no {} build; choose one of {}{}", sys::os(), available_minors().join(", "),
             if minor == "8.6" { " (static PHP 8.6 builds are not published yet)" } else { "" });
     }
-    let rel = releases()?.into_iter().find(|r| r.minor == minor);
+    let rel = match version {
+        Some(v) => Some(release_for(minor, v)?),
+        None => releases()?.into_iter().find(|r| r.minor == minor),
+    };
     let Some(rel) = rel else { bail!("{} lists no build for PHP {minor}", if cfg!(windows) { "windows.php.net" } else { "static-php.dev" }) };
     let current = std::fs::read_to_string(paths::php_dir(minor).join(".tez-version")).unwrap_or_default();
     if current.trim() == rel.version && is_installed(minor) {
@@ -205,49 +284,278 @@ pub fn install(minor: &str, cfg: &Config) -> R<String> {
 
 fn vc_tags() -> &'static [&'static str] { &["vs18", "vs17", "vs16", "vc15"] }
 
-/// Install a PECL extension's DLL into a PHP folder (`ts` for a thread-safe PHP build).
-pub fn pecl_install_into(php_dir: &Path, minor: &str, ext: &str, ts: bool) -> R<String> {
-    if !LOADABLE_EXTENSIONS {
-        bail!("static PHP builds on macOS/Linux include their extensions; PECL add-ons are Windows-only for now (`php -m` lists what PHP {minor} has)");
-    }
-    let listing = fetch::get_text(&format!("{PECL}{ext}/")).map_err(|_| format!("PECL has no Windows builds of '{ext}'"))?;
-    let mut versions: Vec<String> = fetch::hrefs(&listing)
-        .into_iter()
+fn valid_ext_name(ext: &str) -> R<()> {
+    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { bail!("'{ext}' is not an extension name"); }
+    Ok(())
+}
+
+/// Versions with a Windows build folder on downloads.php.net, newest first.
+pub fn pecl_windows_versions(ext: &str) -> Vec<String> {
+    let Ok(listing) = fetch::get_text_retry(&format!("{PECL}{ext}/"), 3) else { return Vec::new() };
+    let mut v: Vec<String> = fetch::hrefs(&listing).into_iter()
         .filter_map(|h| h.strip_suffix('/').map(|s| s.to_string()))
         .filter(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
         .collect();
-    versions.sort_by(|a, b| util::cmp_version(b, a));
-    let stable: Vec<String> = versions.iter().filter(|v| !util::is_prerelease(v)).cloned().collect();
-    let candidates = if stable.is_empty() { versions } else { stable };
+    v.sort_by(|a, b| util::cmp_version(b, a));
+    v.dedup();
+    v
+}
+
+/// Every release pecl.php.net has published for an extension, newest first: (version, stability).
+pub fn pecl_source_releases(ext: &str) -> Vec<(String, String)> {
+    let Ok(xml) = fetch::get_text_retry(&format!("https://pecl.php.net/rest/r/{}/allreleases.xml", ext.to_ascii_lowercase()), 3) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut rest = xml.as_str();
+    while let Some(i) = rest.find("<r>") {
+        rest = &rest[i + 3..];
+        let Some(end) = rest.find("</r>") else { break };
+        let block = &rest[..end];
+        let tag = |t: &str| block.find(&format!("<{t}>")).and_then(|a| block[a + t.len() + 2..].find(&format!("</{t}>")).map(|b| block[a + t.len() + 2..a + t.len() + 2 + b].to_string()));
+        if let Some(v) = tag("v") { out.push((v, tag("s").unwrap_or_else(|| "stable".into()))); }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// The Windows DLL zip of one extension version for one PHP version: Ok(None) when PECL has no
+/// build of it, Err when the listing could not be read (never mistaken for "no build").
+fn pecl_dll_file(ext: &str, ver: &str, minor: &str, flavor: &str) -> R<Option<String>> {
+    let files = fetch::hrefs(&fetch::get_text_retry(&format!("{PECL}{ext}/{ver}/"), 3).map_err(|e| format!("could not read PECL's {ext} {ver} builds: {e}"))?);
+    let want: Vec<String> = vc_tags().iter().map(|vc| format!("php_{ext}-{ver}-{minor}-{flavor}-{vc}-x64.zip")).collect();
+    Ok(files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_string()).find(|f| want.contains(f)))
+}
+
+/// Whether one extension version has a Windows DLL for a PHP version (NTS, x64); Err when PECL
+/// could not be reached.
+pub fn pecl_has_dll(ext: &str, ver: &str, minor: &str) -> R<bool> { Ok(pecl_dll_file(ext, ver, minor, "nts")?.is_some()) }
+
+/// Download a PECL DLL zip and put php_<ext>.dll in ext/ and any helper DLLs beside php.exe.
+fn place_dll_zip(php_dir: &Path, ext: &str, ver: &str, minor: &str, flavor: &str, file: &str) -> R<bool> {
+    let zip = fetch::download(&format!("{PECL}{ext}/{ver}/{file}"), file)?;
+    let tmp = paths::cache_dir().join(format!("pecl-{ext}-{minor}-{flavor}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    fetch::extract(&zip, &tmp, &[])?;
+    let mut placed = false;
+    for entry in walk(&tmp) {
+        let name = entry.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if !name.to_ascii_lowercase().ends_with(".dll") { continue; }
+        let dest = if name.starts_with("php_") { php_dir.join("ext").join(&name) } else { php_dir.join(&name) };
+        std::fs::copy(&entry, &dest)?;
+        placed |= name.starts_with("php_");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(placed)
+}
+
+/// Which version of a PECL extension to install.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PeclWant {
+    /// The newest stable release that has a Windows DLL for this PHP (used when PHP is installed).
+    Auto,
+    /// The newest stable release; built from source when PECL has no DLL for it.
+    Latest,
+    /// Exactly this release; built from source when PECL has no DLL for it.
+    Exact(String),
+}
+
+/// Install a PECL extension's DLL into a PHP folder (`ts` for a thread-safe PHP build).
+pub fn pecl_install_into(php_dir: &Path, minor: &str, ext: &str, ts: bool) -> R<String> {
+    pecl_install_want(php_dir, minor, ext, ts, &PeclWant::Auto, false)
+}
+
+/// Install a PECL extension into a PHP folder: the version `want` asks for, from PECL's Windows
+/// DLLs, else compiled from the pecl.php.net source release (Windows; `force_source` always
+/// compiles).
+pub fn pecl_install_want(php_dir: &Path, minor: &str, ext: &str, ts: bool, want: &PeclWant, force_source: bool) -> R<String> {
+    valid_ext_name(ext)?;
+    if !LOADABLE_EXTENSIONS {
+        bail!("{}", static_note(minor));
+    }
     let flavor = if ts { "ts" } else { "nts" };
-    // Old PHP versions (7.4, 8.0) need older extension releases, so look back far enough.
-    for ver in candidates.iter().take(60) {
-        let files = fetch::hrefs(&fetch::get_text(&format!("{PECL}{ext}/{ver}/")).unwrap_or_default());
-        let want: Vec<String> = vc_tags().iter().map(|vc| format!("php_{ext}-{ver}-{minor}-{flavor}-{vc}-x64.zip")).collect();
-        if let Some(file) = files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_string()).find(|f| want.contains(f)) {
-            let zip = fetch::download(&format!("{PECL}{ext}/{ver}/{file}"), &file)?;
-            let tmp = paths::cache_dir().join(format!("pecl-{ext}-{minor}-{flavor}"));
-            let _ = std::fs::remove_dir_all(&tmp);
-            fetch::extract(&zip, &tmp, &[])?;
-            let mut placed = false;
-            for entry in walk(&tmp) {
-                let name = entry.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                if !name.to_ascii_lowercase().ends_with(".dll") { continue; }
-                let dest = if name.starts_with("php_") { php_dir.join("ext").join(&name) } else { php_dir.join(&name) };
-                std::fs::copy(&entry, &dest)?;
-                placed |= name.starts_with("php_");
+    match want {
+        PeclWant::Exact(ver) => {
+            if !force_source {
+                if let Some(file) = pecl_dll_file(ext, ver, minor, flavor)? {
+                    if place_dll_zip(php_dir, ext, ver, minor, flavor, &file)? { return Ok(ver.clone()); }
+                }
+                util::step(&format!("PECL has no Windows {flavor} build of {ext} {ver} for PHP {minor}; compiling it from source"));
             }
-            let _ = std::fs::remove_dir_all(&tmp);
-            if placed { return Ok(ver.clone()); }
+            build_from_source(php_dir, minor, ext, ver, ts)
+        }
+        PeclWant::Latest => {
+            let source = pecl_source_releases(ext);
+            let newest = source.iter().find(|(v, s)| s == "stable" && !util::is_prerelease(v)).or(source.first()).map(|(v, _)| v.clone())
+                .or_else(|| pecl_windows_versions(ext).into_iter().find(|v| !util::is_prerelease(v)));
+            let Some(ver) = newest else { bail!("PECL lists no release of '{ext}'") };
+            if !force_source {
+                if let Some(file) = pecl_dll_file(ext, &ver, minor, flavor)? {
+                    if place_dll_zip(php_dir, ext, &ver, minor, flavor, &file)? { return Ok(ver); }
+                }
+                util::step(&format!("The newest {ext} ({ver}) has no Windows {flavor} build for PHP {minor}; compiling it from source"));
+            }
+            match build_from_source(php_dir, minor, ext, &ver, ts) {
+                Ok(v) => Ok(v),
+                Err(e) if !force_source => {
+                    util::warn(&format!("compiling {ext} {ver} failed ({e}); installing the newest release PECL built for PHP {minor} instead"));
+                    pecl_install_want(php_dir, minor, ext, ts, &PeclWant::Auto, false)
+                }
+                Err(e) => Err(e),
+            }
+        }
+        PeclWant::Auto => {
+            let versions = pecl_windows_versions(ext);
+            if versions.is_empty() { bail!("PECL has no Windows builds of '{ext}'"); }
+            let stable: Vec<String> = versions.iter().filter(|v| !util::is_prerelease(v)).cloned().collect();
+            let candidates = if stable.is_empty() { versions } else { stable };
+            // Old PHP versions (7.4, 8.0) need older extension releases, so look back far enough.
+            for ver in candidates.iter().take(60) {
+                if let Ok(Some(file)) = pecl_dll_file(ext, ver, minor, flavor) {
+                    if place_dll_zip(php_dir, ext, ver, minor, flavor, &file)? { return Ok(ver.clone()); }
+                }
+            }
+            bail!("no {flavor} build of '{ext}' for PHP {minor} on PECL")
         }
     }
-    bail!("no {flavor} build of '{ext}' for PHP {minor} on PECL")
 }
 
 pub fn pecl_install(minor: &str, ext: &str, ts: bool) -> R<String> {
     let v = pecl_install_into(&paths::php_dir(minor), minor, ext, ts)?;
     util::ok(&format!("{ext} {v} for PHP {minor}"));
     Ok(v)
+}
+
+/// What macOS and Linux can do instead of adding a PECL extension: the static builds already
+/// carry their extensions.
+pub fn static_note(minor: &str) -> String {
+    let mods = modules(&paths::php_dir(minor));
+    format!("PHP on {} is a static build: its extensions are compiled in, so one cannot be added or swapped per version. PHP {minor} already has: {}",
+        sys::os(), if mods.is_empty() { "(install PHP first)".to_string() } else { mods.join(", ") })
+}
+
+/// The installed version of an extension in one PHP folder (from its DLL), if any.
+pub fn pecl_installed_version(minor: &str, ext: &str) -> Option<String> {
+    let dir = paths::php_dir(minor);
+    let php = php_exe(minor);
+    if !php.exists() { return None; }
+    let mut cmd = std::process::Command::new(&php);
+    cmd.hidden();
+    if LOADABLE_EXTENSIONS {
+        if !has_ext(&dir, ext) { return None; }
+        let directive = if matches!(ext, "xdebug" | "opcache") { "zend_extension" } else { "extension" };
+        cmd.args(["-n", "-d", &format!("extension_dir={}", dir.join("ext").display()), "-d", &format!("{directive}={ext}"), "-d", "display_startup_errors=0"]);
+    }
+    let out = cmd.args(["-r", &format!("echo PHP_EOL, phpversion('{ext}') ?: '';")]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let v = text.lines().last().unwrap_or("").trim().to_string();
+    (!v.is_empty() && !v.contains(' ')).then_some(v)
+}
+
+/// The installation folder of Visual Studio (Build Tools) with the x64 C++ compiler, via vswhere.
+fn visual_studio() -> Option<PathBuf> {
+    let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into())).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    if !vswhere.exists() { return None; }
+    let out = std::process::Command::new(vswhere).hidden()
+        .args(["-products", "*", "-latest", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+        .output().ok()?;
+    let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    p.join(r"VC\Auxiliary\Build\vcvarsall.bat").exists().then_some(p)
+}
+
+/// php-sdk-binary-tools (bison, re2c and the rest), unpacked once into the cache.
+fn php_sdk() -> R<PathBuf> {
+    let tag = fetch::github_latest_tag("php/php-sdk-binary-tools").unwrap_or_else(|_| "php-sdk-2.9.0".into());
+    let root = paths::cache_dir().join("php-sdk").join(&tag);
+    let marker = root.join(".tez-ready");
+    if marker.exists() {
+        if let Some(d) = std::fs::read_dir(&root).ok().and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.join("msys2").exists())) { return Ok(d); }
+    }
+    util::step(&format!("Downloading the PHP SDK tools ({tag})"));
+    let zip = fetch::download(&format!("https://github.com/php/php-sdk-binary-tools/archive/refs/tags/{tag}.zip"), &format!("php-sdk-binary-tools-{tag}.zip"))?;
+    let _ = std::fs::remove_dir_all(&root);
+    fetch::extract(&zip, &root, &[])?;
+    std::fs::write(&marker, &tag)?;
+    std::fs::read_dir(&root)?.flatten().map(|e| e.path()).find(|p| p.join("msys2").exists()).ok_or_else(|| "the PHP SDK archive has an unexpected layout".into())
+}
+
+/// The PHP development pack matching an installed PHP (headers, php8.lib, phpize).
+fn devel_pack(full: &str, ts: bool) -> R<PathBuf> {
+    let flavor = if ts { "" } else { "nts-" };
+    let found = windows_listings().into_iter().find(|(n, _)| n.starts_with(&format!("php-devel-pack-{full}-{flavor}Win32-")) && n.ends_with("-x64.zip"));
+    let Some((zip, base)) = found else { bail!("windows.php.net has no development pack for PHP {full}") };
+    util::step(&format!("Downloading {zip}"));
+    let file = fetch::download(&format!("{base}{zip}"), &zip)?;
+    let dest = paths::cache_dir().join("php-devel").join(zip.trim_end_matches(".zip"));
+    if !dest.exists() { fetch::extract(&file, &dest, &[])?; }
+    std::fs::read_dir(&dest)?.flatten().map(|e| e.path()).find(|p| p.join("phpize.bat").exists()).ok_or_else(|| "the development pack has no phpize.bat".into())
+}
+
+/// The configure switch an extension's config.w32 declares: "--enable-igbinary", "--with-redis".
+fn configure_switch(src: &Path, ext: &str) -> String {
+    let text = std::fs::read_to_string(src.join("config.w32")).unwrap_or_default();
+    let mut first: Option<String> = None;
+    for kind in ["ARG_ENABLE", "ARG_WITH"] {
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find(&format!("{kind}(")) {
+            rest = &rest[i + kind.len() + 1..];
+            let name: String = rest.trim_start().trim_start_matches(['"', '\'']).chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+            let flag = format!("--{}-{name}", if kind == "ARG_ENABLE" { "enable" } else { "with" });
+            if name.eq_ignore_ascii_case(ext) || name.replace('-', "_").eq_ignore_ascii_case(&ext.replace('-', "_")) { return flag; }
+            if first.is_none() && !name.is_empty() { first = Some(flag); }
+        }
+    }
+    first.unwrap_or_else(|| format!("--enable-{ext}"))
+}
+
+/// Compile a PECL extension from its pecl.php.net source release with Visual Studio, the PHP SDK
+/// tools and the matching development pack, and put the DLL in ext/. The build output goes to
+/// stdout, so a dashboard job shows all of it.
+pub fn build_from_source(php_dir: &Path, minor: &str, ext: &str, ver: &str, ts: bool) -> R<String> {
+    valid_ext_name(ext)?;
+    if !cfg!(windows) { bail!("{}", static_note(minor)); }
+    if ts { bail!("source builds are for the NTS PHP that serves sites; thread-safe builds take PECL's DLLs only"); }
+    let full = std::fs::read_to_string(php_dir.join(".tez-version")).map(|s| s.trim().to_string()).map_err(|_| format!("PHP {minor} is not installed"))?;
+    let vs = visual_studio().ok_or("compiling an extension needs Visual Studio 2022 Build Tools with the C++ workload (winget install Microsoft.VisualStudio.2022.BuildTools --override \"--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive\")")?;
+    fetch::ensure_space(&paths::cache_dir(), 400 << 20)?;
+    let sdk = php_sdk()?;
+    let devel = devel_pack(&full, ts)?;
+    util::step(&format!("Downloading the {ext} {ver} source from pecl.php.net"));
+    let tgz = fetch::download(&format!("https://pecl.php.net/get/{ext}-{ver}.tgz"), &format!("{ext}-{ver}.tgz"))
+        .map_err(|_| format!("pecl.php.net has no source release {ext} {ver}"))?;
+    let build = paths::cache_dir().join("pecl-build").join(format!("{ext}-{ver}-{minor}"));
+    let _ = std::fs::remove_dir_all(&build);
+    fetch::extract(&tgz, &build, &[])?;
+    let src = walk(&build).into_iter().find(|p| p.file_name().map(|n| n == "config.w32").unwrap_or(false)).and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .ok_or_else(|| format!("{ext} {ver} has no config.w32, so it does not build on Windows"))?;
+    let switch = configure_switch(&src, ext);
+    let bat = format!(
+        "@echo off\r\nset \"VSCMD_START_DIR={src}\"\r\ncall \"{vc}\" x64 >nul 2>nul || (echo tez: could not set up Visual Studio & exit /b 1)\r\nset \"PATH={sdk}\\bin;{sdk}\\msys2\\usr\\bin;%PATH%\"\r\ncd /d \"{src}\"\r\necho tez: phpize\r\ncall \"{devel}\\phpize.bat\" || exit /b 2\r\necho tez: configure {switch}\r\ncall \"{src}\\configure.bat\" {switch} || exit /b 3\r\necho tez: nmake\r\nnmake || exit /b 4\r\n",
+        src = src.display(), vc = vs.join(r"VC\Auxiliary\Build\vcvarsall.bat").display(), sdk = sdk.display(), devel = devel.display(),
+    );
+    let script = build.join("tez-build.bat");
+    std::fs::write(&script, bat)?;
+    util::step(&format!("Compiling {ext} {ver} for PHP {full} ({switch}) with {}", vs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+    // No console window: the output is piped through to tez's own output (the job log).
+    let mut child = std::process::Command::new(paths::system32("cmd.exe")).arg("/c").arg(&script).current_dir(&src)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).hidden().spawn()?;
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let forward = |r: Option<Box<dyn std::io::Read + Send>>| std::thread::spawn(move || {
+        use std::io::BufRead;
+        if let Some(r) = r { for line in std::io::BufReader::new(r).lines().map_while(Result::ok) { println!("{line}"); } }
+    });
+    let t1 = forward(out.map(|o| Box::new(o) as Box<dyn std::io::Read + Send>));
+    let t2 = forward(err.map(|e| Box::new(e) as Box<dyn std::io::Read + Send>));
+    let st = child.wait()?;
+    let _ = (t1.join(), t2.join());
+    if !st.success() { bail!("compiling {ext} {ver} failed at step {} (1 Visual Studio, 2 phpize, 3 configure, 4 nmake); the output above has the reason", st.code().unwrap_or(-1)); }
+    let dll = walk(&src.join("x64")).into_iter().find(|p| {
+        let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        n.starts_with("php_") && n.ends_with(".dll")
+    }).ok_or("the build finished but made no php_*.dll")?;
+    let name = dll.file_name().unwrap().to_string_lossy().to_string();
+    std::fs::copy(&dll, php_dir.join("ext").join(&name))?;
+    let _ = std::fs::remove_dir_all(&build);
+    util::ok(&format!("compiled {name} ({ext} {ver}) for PHP {full}"));
+    Ok(ver.to_string())
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
@@ -319,7 +627,7 @@ pub fn modules(php_dir: &Path) -> Vec<String> {
         if !v.is_empty() { return v; }
     }
     let exe = php_dir.join(sys::exe("php"));
-    let Ok(out) = std::process::Command::new(&exe).args(["-n", "-m"]).output() else { return Vec::new() };
+    let Ok(out) = std::process::Command::new(&exe).args(["-n", "-m"]).hidden().output() else { return Vec::new() };
     let mut v: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
         .map(|l| l.trim().to_ascii_lowercase().replace(' ', "_"))
         .filter(|l| !l.is_empty() && !l.starts_with('['))

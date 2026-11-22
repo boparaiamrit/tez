@@ -3,6 +3,7 @@
 //! are compiled into tez.
 
 use crate::paths;
+use crate::sys::Hidden;
 use crate::util::R;
 use crate::bail;
 use std::io::IsTerminal;
@@ -13,7 +14,8 @@ const UA: &str = "tez/0.1 (+https://github.com/boparaiamrit/tez)";
 
 fn curl() -> Command {
     let mut c = Command::new(paths::tool("curl"));
-    c.stdin(Stdio::null());
+    // The daemon has no console: without this every request would flash a window.
+    c.stdin(Stdio::null()).hidden();
     c
 }
 
@@ -27,10 +29,16 @@ fn github_auth(cmd: &mut Command, url: &str) {
     }
 }
 
+/// The user agent to send: tez's own, except to Oracle's MySQL downloads, which answer 403 to
+/// anything but curl's default.
+fn ua(url: &str) -> Vec<&'static str> {
+    if url.contains("mysql.com/") { Vec::new() } else { vec!["-A", UA] }
+}
+
 /// GET a URL and return the body as text.
 pub fn get_text(url: &str) -> R<String> {
     let mut cmd = curl();
-    cmd.args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-A", UA]);
+    cmd.args(["-fsSL", "--retry", "2", "--connect-timeout", "15"]).args(ua(url));
     github_auth(&mut cmd, url);
     let out = cmd.arg(url).output()?;
     if !out.status.success() {
@@ -39,11 +47,21 @@ pub fn get_text(url: &str) -> R<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// GET with a few retries and a short pause between them, for listings fetched in parallel.
+pub fn get_text_retry(url: &str, tries: u32) -> R<String> {
+    let mut last = None;
+    for i in 0..tries.max(1) {
+        match get_text(url) { Ok(t) => return Ok(t), Err(e) => last = Some(e) }
+        std::thread::sleep(std::time::Duration::from_millis(400 * (i as u64 + 1)));
+    }
+    Err(last.unwrap_or_else(|| "no attempt made".into()))
+}
+
 /// True when the URL answers 200 to a HEAD request (after redirects).
 pub fn exists(url: &str) -> bool {
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     curl()
-        .args(["-fsIL", "-o", null, "--connect-timeout", "10", "-A", UA, url])
+        .args(["-fsIL", "-o", null, "--connect-timeout", "10"]).args(ua(url)).arg(url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -75,7 +93,7 @@ pub fn download(url: &str, file_name: &str) -> R<PathBuf> {
     std::fs::create_dir_all(paths::cache_dir())?;
     let part = dest.with_extension("part");
     let mut cmd = curl();
-    cmd.args(["-fL", "--retry", "3", "--connect-timeout", "20", "-A", UA, "-o"]).arg(&part).arg(url);
+    cmd.args(["-fL", "--retry", "3", "--connect-timeout", "20"]).args(ua(url)).arg("-o").arg(&part).arg(url);
     if std::io::stderr().is_terminal() { cmd.arg("-#"); } else { cmd.arg("-s"); }
     let status = cmd.status()?;
     if !status.success() {
@@ -200,8 +218,59 @@ pub fn github_tags(repo: &str) -> R<Vec<String>> {
         .collect())
 }
 
+/// One GitHub release: its tag, whether it is a pre-release, and its asset file names.
+pub struct GhRelease { pub tag: String, pub prerelease: bool, pub assets: Vec<String> }
+
+/// Releases of a GitHub repository, newest first, up to `pages` pages of 100 (drafts left out).
+pub fn github_releases(repo: &str, pages: u32) -> R<Vec<GhRelease>> {
+    let mut out = Vec::new();
+    for page in 1..=pages.max(1) {
+        let body = get_text(&format!("https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"))?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let list = v.as_array().cloned().unwrap_or_default();
+        let n = list.len();
+        for r in list {
+            if r["draft"].as_bool().unwrap_or(false) { continue; }
+            let Some(tag) = r["tag_name"].as_str() else { continue };
+            out.push(GhRelease {
+                tag: tag.to_string(),
+                prerelease: r["prerelease"].as_bool().unwrap_or(false),
+                assets: r["assets"].as_array().into_iter().flatten().filter_map(|a| a["name"].as_str().map(|s| s.to_string())).collect(),
+            });
+        }
+        if n < 100 { break; }
+    }
+    Ok(out)
+}
+
+/// Run `f` over `items` on up to `threads` threads; results keep the input order. Used for the
+/// many small HEAD requests behind the version catalog.
+pub fn par_map<T: Sync, U: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let slots: Mutex<Vec<Option<U>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.max(1).min(items.len().max(1)) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= items.len() { break; }
+                let r = f(&items[i]);
+                slots.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    slots.into_inner().unwrap().into_iter().map(|o| o.expect("every item mapped")).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn par_map_keeps_order() {
+        let v: Vec<u32> = (0..50).collect();
+        assert_eq!(super::par_map(&v, 8, |x| x * 2), (0..50).map(|x| x * 2).collect::<Vec<_>>());
+    }
+
     #[test]
     fn finds_hrefs() {
         let h = r#"<a href="6.2.0/">6.2.0</a> <a href="6.3.0/">6.3.0</a>"#;

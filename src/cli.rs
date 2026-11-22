@@ -55,6 +55,8 @@ fn dispatch(args: &[String]) -> R<()> {
         ["which"] => which(),
         ["ext", "install", name, rest @ ..] => ext_install(name, rest),
         ["ext", "list"] => ext_list(),
+        ["versions", "pecl", ext, rest @ ..] => versions_pecl(ext, rest),
+        ["versions", rest @ ..] => versions(rest),
         ["xdebug", state] => xdebug(state),
         ["dumps", state] => dumps(state),
         ["park"] => park(None, true),
@@ -137,7 +139,9 @@ PHP
   tez use 8.4                           default version
   tez isolate 8.1 [site]                pin a site; unisolate to undo
   tez which                             the php binary used in this folder
-  tez ext install imagick [--php all]   any PECL extension
+  tez ext install imagick [--php all] [--version 3.8.0] [--source]   any PECL extension; compiled when PECL has no DLL
+  tez versions [--json] [--refresh]   every version of every service, PostgreSQL extension and PHP
+  tez versions pecl redis [--php 8.4] [--json]   every release of a PECL extension, with Windows DLLs
   tez xdebug on|off                     tez dumps on|off
 
 Services
@@ -486,9 +490,35 @@ fn php_list() -> R<()> {
 
 fn php_install(vs: &[&str]) -> R<()> {
     let cfg = Config::load();
-    let list: Vec<String> = if vs.is_empty() || vs == ["all"] { php::available_minors().iter().map(|s| s.to_string()).collect() } else { vs.iter().map(|v| php::normalize(v)).collect::<R<_>>()? };
-    for v in list { php::install(&v, &cfg)?; }
+    if vs.is_empty() || vs == ["all"] {
+        for v in php::available_minors() { php::install(v, &cfg)?; }
+        return reload_if_running();
+    }
+    for v in vs {
+        let minor = php::normalize(v)?;
+        let exact = v.trim_start_matches("php").split('.').count() == 3;
+        if exact { php_install_exact(&minor, v.trim_start_matches("php"), &cfg)?; } else { php::install(&minor, &cfg)?; }
+    }
     reload_if_running()
+}
+
+/// Install one exact PHP patch ("8.3.27"). The PHP pool and the site processes on that version
+/// hold its files, so they pause while the folder is swapped.
+fn php_install_exact(minor: &str, version: &str, cfg: &Config) -> R<()> {
+    let users: Vec<String> = sites::all(cfg).into_iter().filter(|s| s.php == minor && s.settings.up).map(|s| s.name).collect();
+    let pause = api::running() && php::is_installed(minor);
+    if pause {
+        util::step(&format!("Pausing PHP {minor} and the sites that use it"));
+        let _ = api::call("POST", &format!("/api/proc/php-{minor}/stop"));
+        for s in &users { let _ = api::call("POST", &format!("/api/proc/{s}/stop")); }
+        std::thread::sleep(Duration::from_secs(4));
+    }
+    let result = php::install_version(minor, Some(version), cfg);
+    if pause {
+        let _ = api::call("POST", &format!("/api/proc/php-{minor}/start"));
+        for s in &users { let _ = api::call("POST", &format!("/api/proc/{s}/start")); }
+    }
+    result.map(|_| ())
 }
 
 fn php_update(vs: &[&str]) -> R<()> {
@@ -559,14 +589,31 @@ fn which() -> R<()> {
     Ok(())
 }
 
+/// tez ext install <name> [--php 8.4|all] [--version 6.1.0] [--source]
+/// Without --version, the newest release: PECL's DLL when there is one, else compiled from
+/// source (Windows). --source always compiles.
 fn ext_install(name: &str, rest: &[&str]) -> R<()> {
     let mut cfg = Config::load();
-    let targets: Vec<String> = match rest {
-        ["--php", "all"] => php::installed().into_iter().map(|(m, _)| m).collect(),
-        ["--php", v] => vec![php::normalize(v)?],
-        _ => vec![cfg.default_php.clone()],
+    let (mut target, mut version, mut source) = (None, None, false);
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--php" => { target = rest.get(i + 1).copied(); i += 2; }
+            "--version" => { version = rest.get(i + 1).map(|s| s.to_string()); i += 2; }
+            "--source" => { source = true; i += 1; }
+            other => bail!("unknown option '{other}' (use --php, --version, --source)"),
+        }
+    }
+    let targets: Vec<String> = match target {
+        Some("all") => php::installed().into_iter().map(|(m, _)| m).collect(),
+        Some(v) => vec![php::normalize(v)?],
+        None => vec![cfg.default_php.clone()],
     };
-    for m in &targets { php::pecl_install(m, name, false)?; }
+    let want = match version { Some(v) => php::PeclWant::Exact(v), None => php::PeclWant::Latest };
+    for m in &targets {
+        let v = php::pecl_install_want(&paths::php_dir(m), m, name, false, &want, source)?;
+        util::ok(&format!("{name} {v} for PHP {m}"));
+    }
     if !cfg.extensions.iter().any(|e| e == name) && !php::PECL_DEFAULT.contains(&name) { cfg.extensions.push(name.to_string()); }
     cfg.save()?;
     php::write_all_inis(&cfg)?;
@@ -684,7 +731,13 @@ fn service_install(name: &str, ver: Option<&str>) -> R<()> {
     let want = ver.unwrap_or(info.version).to_string();
     // A second version of a service runs beside the first, on its own port: postgres@16.
     let key = if name.contains('@') { name.to_string() } else { services::instance_key(&cfg, &kind, &want) };
-    let v = services::install(&kind, Some(&want))?;
+    // An exact version of a series that runs now replaces its folder: pause it meanwhile.
+    let pause = ver.is_some() && api::running() && cfg.services.contains_key(&key) && matches!(kind.as_str(), "postgres" | "mysql" | "mariadb" | "mongodb");
+    if pause { util::step(&format!("Stopping {key} while it is replaced")); let _ = api::call("POST", &format!("/api/proc/{key}/stop")); std::thread::sleep(Duration::from_secs(4)); }
+    let v = match services::install(&kind, Some(&want)) {
+        Ok(v) => v,
+        Err(e) => { if pause { let _ = api::call("POST", &format!("/api/proc/{key}/start")); } return Err(e); }
+    };
     let port = match cfg.services.get(&key) { Some(sc) if sc.port != 0 => sc.port, _ if key == kind => 0, _ => services::free_port(&cfg, info.port + 1) };
     let e = cfg.services.entry(key.clone()).or_default();
     e.version = v;
@@ -692,7 +745,9 @@ fn service_install(name: &str, ver: Option<&str>) -> R<()> {
     e.port = port;
     cfg.save()?;
     if key != kind { util::ok(&format!("runs as `{key}` on port {port}")); }
-    reload_if_running()
+    reload_if_running()?;
+    if pause { let _ = api::call("POST", &format!("/api/proc/{key}/start")); }
+    Ok(())
 }
 
 fn pg_ext(ext: &str, rest: &[&str]) -> R<()> {
@@ -1140,5 +1195,64 @@ fn doctor(rest: &[&str]) -> R<()> {
         let code = sys::run_elevated(Path::new("powershell.exe"), &["-NoProfile".into(), "-Command".into(), script])?;
         if code == 0 { util::ok("Defender no longer scans tez or your site folders"); } else { util::warn("Defender exclusions were not added"); }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- versions
+
+/// tez versions [--json] [--refresh]: the version catalog, built here (no daemon needed).
+fn versions(rest: &[&str]) -> R<()> {
+    let v = crate::catalog::get(rest.contains(&"--refresh"));
+    if rest.contains(&"--json") { println!("{}", serde_json::to_string_pretty(&v)?); return Ok(()); }
+    let mark = |o: &serde_json::Value| {
+        let ver = o["version"].as_str().unwrap_or_default();
+        if o["installed"].as_bool() == Some(true) { green(&format!("{ver}*")) }
+        else if o["available"].as_bool() == Some(false) || o["binary"].as_bool() == Some(false) { dim(ver) }
+        else { ver.to_string() }
+    };
+    println!("{}  {}", bold("Services"), dim("(* installed, dim: no build for this machine)"));
+    for (k, s) in v["services"].as_object().into_iter().flatten() {
+        let list: Vec<serde_json::Value> = s["versions"].as_array().cloned().unwrap_or_default();
+        let shown: Vec<String> = list.iter().take(12).map(mark).collect();
+        let more = if list.len() > 12 { dim(&format!(" +{} more", list.len() - 12)) } else { String::new() };
+        let err = s["error"].as_str().map(|e| red(&format!("  {e}"))).unwrap_or_default();
+        println!("  {:<14}{}{more}{err}", s["title"].as_str().unwrap_or(k), shown.join(" "));
+    }
+    println!("{}", bold("PostgreSQL extensions"));
+    for (e, per) in v["pg_extensions"].as_object().into_iter().flatten() {
+        for (m, list) in per.as_object().into_iter().flatten() {
+            let list: Vec<serde_json::Value> = list.as_array().cloned().unwrap_or_default();
+            if list.is_empty() { continue; }
+            let shown: Vec<String> = list.iter().take(10).map(mark).collect();
+            let more = if list.len() > 10 { dim(&format!(" +{} more", list.len() - 10)) } else { String::new() };
+            println!("  {:<18}{}", format!("{e} pg{m}"), shown.join(" ") + &more);
+        }
+    }
+    if let Some(n) = v["pg_extensions_note"].as_str() { println!("  {}", dim(n)); }
+    println!("{}", bold("PHP"));
+    for p in v["php"].as_array().into_iter().flatten() {
+        let inst = p["installed"].as_str().unwrap_or_default().to_string();
+        let list: Vec<String> = p["versions"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).take(12)
+            .map(|x| if x == inst { green(&format!("{x}*")) } else { x.to_string() }).collect();
+        let total = p["versions"].as_array().map(|a| a.len()).unwrap_or(0);
+        let more = if total > 12 { dim(&format!(" +{} more", total - 12)) } else { String::new() };
+        println!("  {:<14}{}{more}", format!("PHP {}", p["minor"].as_str().unwrap_or_default()), list.join(" "));
+    }
+    Ok(())
+}
+
+/// tez versions pecl <ext> [--php 8.4] [--json]
+fn versions_pecl(ext: &str, rest: &[&str]) -> R<()> {
+    let cfg = Config::load();
+    let minor = rest.iter().position(|a| *a == "--php").and_then(|i| rest.get(i + 1)).map(|s| s.to_string()).unwrap_or(cfg.default_php.clone());
+    let v = crate::catalog::pecl_versions(&minor, ext)?;
+    if rest.contains(&"--json") { println!("{}", serde_json::to_string_pretty(&v)?); return Ok(()); }
+    println!("{} for PHP {}  {}", bold(ext), v["minor"].as_str().unwrap_or_default(),
+        v["installed"].as_str().map(|i| green(&format!("installed {i}"))).unwrap_or_else(|| dim("not installed")));
+    for o in v["versions"].as_array().into_iter().flatten() {
+        let how = if o["binary"].as_bool() == Some(true) { green("Windows DLL") } else if v["builds_from_source"].as_bool() == Some(true) && o["source"].as_bool() == Some(true) { yellow("compiled from source") } else { dim("no build") };
+        println!("  {:<12} {:<8} {how}", o["version"].as_str().unwrap_or_default(), o["stability"].as_str().unwrap_or_default());
+    }
+    if let Some(n) = v["note"].as_str() { println!("{}", dim(n)); }
     Ok(())
 }

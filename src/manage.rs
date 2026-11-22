@@ -170,12 +170,31 @@ pub fn pecl_catalog() -> R<Value> {
     Ok(v)
 }
 
-/// body: { "settings": { key: value | null }, "extensions": { name: true|false }, "install": "imagick" }
+/// POST /api/php { "install_version": "8.3.27" }: install one exact PHP patch as a job.
+pub fn php_install_version(body: &Value) -> R<Value> {
+    let v = body["install_version"].as_str().unwrap_or_default().trim().to_string();
+    if v.split('.').count() != 3 || !v.chars().all(|c| c.is_ascii_digit() || c == '.') { bail!("give a full PHP version such as 8.3.27"); }
+    php::normalize(&v)?;
+    let id = start_job(&["php".into(), "install".into(), v.clone()], None, &format!("Install PHP {v}"))?;
+    Ok(json!({ "ok": true, "job": id }))
+}
+
+/// body: { "settings": { key: value | null }, "extensions": { name: true|false },
+///         "install": "imagick", "version": "3.8.0"?, "source": true? }
 pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
     if let Some(ext) = body["install"].as_str() {
         if !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { bail!("bad extension name"); }
         let target = if minor == "all" { "all".to_string() } else { php::normalize(minor)? };
-        let id = start_job(&["ext".into(), "install".into(), ext.into(), "--php".into(), target.clone()], None, &format!("Install {ext} for PHP {target}"))?;
+        let mut args: Vec<String> = vec!["ext".into(), "install".into(), ext.into(), "--php".into(), target.clone()];
+        let version = body["version"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(v) = &version {
+            if !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') { bail!("bad extension version"); }
+            args.push("--version".into());
+            args.push(v.clone());
+        }
+        if body["source"].as_bool() == Some(true) { args.push("--source".into()); }
+        let title = format!("Install {ext}{} for PHP {target}", version.map(|v| format!(" {v}")).unwrap_or_default());
+        let id = start_job(&args, None, &title)?;
         return Ok(json!({ "ok": true, "job": id }));
     }
     let mut cfg = Config::load();
