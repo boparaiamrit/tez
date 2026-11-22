@@ -929,9 +929,10 @@ fn write_postgres_conf(major: &str, port: u16, sc: &ServiceConfig) -> R<()> {
     let data = data("postgres", major);
     let has_ts = dir("postgres", major).join("lib").join("timescaledb.dll").exists();
     let mut s = format!("# Written by tez on every start; change these in the dashboard (Services).\nlisten_addresses = '127.0.0.1'\nport = {port}\nlog_destination = 'stderr'\nlogging_collector = off\n");
-    // Portable builds may default the socket to /var/run/postgresql, which needs root; tez
-    // connects over TCP, so keep the socket beside the data.
-    if !cfg!(windows) { s.push_str(&format!("unix_socket_directories = '{}'\n", paths::fwd(&data))); }
+    // Portable builds may default the socket to /var/run/postgresql, which needs root. Every
+    // instance's socket goes in one folder (the file name carries the port), so DB_HOST can name
+    // it whatever the version: see `pg_host`.
+    if !cfg!(windows) { s.push_str(&format!("unix_socket_directories = '{}'\n", paths::fwd(&paths::run_dir()))); }
     for (k, _, _) in options_for("postgres") {
         if k.starts_with("timescaledb.") && !has_ts { continue; }
         let v = opt(sc, "postgres", k);
@@ -1051,6 +1052,18 @@ pub fn spec(key: &str, sc: &ServiceConfig) -> R<Spec> {
 }
 
 // ------------------------------------------------------------------ databases
+
+/// The DB_HOST that PHP projects use for tez's PostgreSQL.
+///
+/// On macOS it is the socket folder, not 127.0.0.1. The static PHP builds tez uses there get
+/// PDO's PostgreSQL driver from Swoole (static-php-cli builds them with swoole-hook-pgsql instead
+/// of PHP's own pdo_pgsql), and Swoole's connect loop loses libpq's first packet on a TCP
+/// connection macOS has not finished opening: the server waits for a startup message that never
+/// comes and drops the connection after 60 seconds. Unix sockets connect at once, so they work;
+/// so does `pg_connect`, and so does TCP on Linux, where loopback connects complete immediately.
+pub fn pg_host() -> String {
+    if cfg!(target_os = "macos") { paths::fwd(&paths::run_dir()) } else { "127.0.0.1".into() }
+}
 
 /// psql against tez's main PostgreSQL.
 pub fn psql(cfg: &Config, db: &str, sql: &str) -> R<String> {

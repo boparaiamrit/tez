@@ -158,6 +158,12 @@ differs from Windows:
 | MariaDB | official bintar | Linux x86_64 only |
 | MongoDB, MySQL, Mailpit, Meilisearch, RustFS | official builds per OS | MongoDB on Linux: Ubuntu, Debian, RHEL, Amazon Linux. RustFS: no Intel Mac build |
 
+On macOS, `tez adopt` and `tez setup` set `DB_HOST` to PostgreSQL's socket folder (`~/.tez/run`)
+instead of `127.0.0.1`. The static PHP builds get PDO's PostgreSQL driver from Swoole, which
+cannot open TCP connections on macOS: it waits 60 seconds, then fails. `pg_connect` and the
+socket both work. Keep PHP's `DB_HOST` on the socket; TablePlus and psql can still use
+`127.0.0.1`.
+
 Processes run in their own process groups instead of Job Objects; the daemon ends them all on
 `tez stop`, SIGTERM or SIGINT, and a new daemon ends any a crashed one left behind. `tez trust`
 and `tez hosts` use `sudo` (the CA goes into the System keychain on macOS, or

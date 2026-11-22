@@ -28,7 +28,9 @@ curl -sf "http://127.0.0.1:7979/api/metrics?range=15m" | jq -e '.machine.total >
 echo "metrics: ok"
 
 for _ in $(seq 1 30); do tez db create smoke && break; sleep 2; done
-php -r '$p = new PDO("pgsql:host=127.0.0.1;port=5432;dbname=smoke", "postgres", ""); echo $p->query("select 40+2")->fetchColumn(), "\n";' | grep -q 42
-echo "postgres through PDO: ok"
+# The DB_HOST tez writes into a project's .env: the socket folder on macOS (see services::pg_host).
+PGH=127.0.0.1; [ "$(uname)" = Darwin ] && PGH="$HOME/.tez/run"
+PGH="$PGH" php -r '$p = new PDO("pgsql:host=" . getenv("PGH") . ";port=5432;dbname=smoke", "postgres", ""); echo $p->query("select 40+2")->fetchColumn(), "\n";' | grep -q 42
+echo "postgres through PDO ($PGH): ok"
 
 tez stop

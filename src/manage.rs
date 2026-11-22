@@ -290,7 +290,7 @@ fn env_snippet(name: &str, port: u16, sc: &services_cfg::ServiceConfig) -> Vec<(
     match services::kind(name) {
         "mysql" | "mariadb" => vec![v("DB_CONNECTION", if services::kind(name) == "mariadb" { "mariadb" } else { "mysql" }), v("DB_HOST", "127.0.0.1"), v("DB_PORT", &p), v("DB_USERNAME", "root"), v("DB_PASSWORD", "")],
         "mongodb" => vec![v("MONGODB_URI", &format!("mongodb://127.0.0.1:{p}"))],
-        "postgres" => vec![v("DB_CONNECTION", "pgsql"), v("DB_HOST", "127.0.0.1"), v("DB_PORT", &p), v("DB_USERNAME", "postgres"), v("DB_PASSWORD", "")],
+        "postgres" => vec![v("DB_CONNECTION", "pgsql"), v("DB_HOST", &services::pg_host()), v("DB_PORT", &p), v("DB_USERNAME", "postgres"), v("DB_PASSWORD", "")],
         "redis" => vec![v("REDIS_CLIENT", "phpredis"), v("REDIS_HOST", "127.0.0.1"), v("REDIS_PORT", &p), v("REDIS_PASSWORD", "null")],
         "mailpit" => vec![v("MAIL_MAILER", "smtp"), v("MAIL_HOST", "127.0.0.1"), v("MAIL_PORT", &p), v("MAIL_ENCRYPTION", "null")],
         "meilisearch" => vec![v("SCOUT_DRIVER", "meilisearch"), v("MEILISEARCH_HOST", &format!("http://127.0.0.1:{p}")), v("MEILISEARCH_KEY", sc.options.get("master-key").map(|s| s.as_str()).unwrap_or(""))],

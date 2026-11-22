@@ -202,7 +202,7 @@ pub fn adopt(cfg: &Config, site: &Site) -> R<Vec<String>> {
     set(&mut changes, "APP_URL", site.url(cfg));
     let conn = env.get("DB_CONNECTION").cloned().unwrap_or_default();
     if conn == "pgsql" {
-        set(&mut changes, "DB_HOST", "127.0.0.1".into());
+        set(&mut changes, "DB_HOST", crate::services::pg_host());
         set(&mut changes, "DB_PORT", svc_port("postgres", 5432).to_string());
     }
     if env.contains_key("REDIS_HOST") {
