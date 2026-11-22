@@ -483,6 +483,8 @@ async function serviceSettings(key) {
 async function renderSettings() {
   const st = await get('/api/settings');
   $('#cfg-path').textContent = st.home + '\\config\\tez.json';
+  const nginxOk = !(st.web_servers && st.web_servers.nginx && st.web_servers.nginx.available === false);
+  const nginxWhy = (st.web_servers && st.web_servers.nginx && st.web_servers.nginx.reason) || '';
   const phpOpts = st.php_installed.map(m => `<option ${m === st.default_php ? 'selected' : ''}>${m}</option>`).join('');
   $('#settings').innerHTML = `
     <div class="group essential"><div class="gh">Essentials</div>
@@ -496,6 +498,7 @@ async function renderSettings() {
       <div class="field"><label>Dumps</label><div>${switchEl('g-dumps', st.dumps)}</div><div class="about">Copies every dump() and dd() to the Dumps tab.</div></div>
     </details>
     <details class="group"><summary>Web server</summary>
+      <div class="field"><label>Server</label><select id="g-web"><option value="caddy" ${st.web_server === 'nginx' ? '' : 'selected'}>Caddy</option><option value="nginx" ${st.web_server === 'nginx' ? 'selected' : ''} ${nginxOk ? '' : 'disabled'}>Nginx</option></select><div class="about">${nginxOk ? 'Same sites, names and HTTPS with either. PHP is not touched.' : 'Nginx is not available here. ' + esc(nginxWhy)}</div></div>
       <div class="field"><label>HTTP port</label><input type="number" id="g-http" value="${st.http_port}"></div>
       <div class="field"><label>HTTPS port</label><input type="number" id="g-https" value="${st.https_port}"><div class="about">If a port is taken, tez uses 8088 / 8443 and says so at the top.</div></div>
       <div class="field"><label>PHP workers</label><input type="number" id="g-workers" value="${st.php_workers}" min="1" max="10"><div class="about">php-cgi processes per version; each serves one request at a time.</div></div>
@@ -517,6 +520,8 @@ async function renderSettings() {
   }, 'Settings saved');
   $$('#settings input[type=checkbox]').forEach(i => i.onchange = save);
   $$('#settings select').forEach(i => i.onchange = save);
+  // Switching servers is its own request: it replaces the web process, nothing else.
+  $('#g-web').onchange = () => post('/api/settings', { web_server: $('#g-web').value }, 'Web server switched');
   $$('#settings input[type=text], #settings input[type=number], #settings textarea').forEach(i => i.onchange = save);
 }
 

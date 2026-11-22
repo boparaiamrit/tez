@@ -29,12 +29,31 @@ pub fn settings_get() -> Value {
         "autostart": autostart_enabled(), "home": paths::home(),
         "php_installed": php::installed().into_iter().map(|(m, _)| m).collect::<Vec<_>>(),
         "ca_trusted": ca_trusted(), "free_disk": sys::free_bytes(&paths::home()),
+        "web_server": web::server(&cfg), "web_server_wanted": cfg.web_server,
+        "web_servers": web_servers(),
         "os": sys::os(), "arch": sys::arch(),
+    })
+}
+
+/// Each web server tez can run here: whether it can, and why not.
+fn web_servers() -> Value {
+    let (ok, reason) = crate::nginx::available();
+    json!({
+        "caddy": { "available": true, "reason": "", "version": web::CADDY_VERSION },
+        "nginx": { "available": ok, "reason": reason, "version": crate::nginx::VERSION },
     })
 }
 
 pub fn settings_set(shared: &Shared, body: &Value) -> R<Value> {
     let mut cfg = Config::load();
+    if let Some(v) = body["web_server"].as_str() {
+        let v = v.trim().to_ascii_lowercase();
+        if v != "caddy" && v != "nginx" { bail!("the web server is caddy or nginx, not {v}"); }
+        if v == "nginx" { let (ok, why) = crate::nginx::available(); if !ok { bail!("{why}"); } }
+        cfg.web_server = v;
+        // Download it before switching, so a failed download leaves the current server running.
+        web::install_server(&cfg)?;
+    }
     if let Some(v) = body["tld"].as_str() {
         let t = util::host_label(v);
         if t.is_empty() || t == "localhost" { bail!("choose a domain such as test"); }

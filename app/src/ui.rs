@@ -276,19 +276,24 @@ pub fn code_block(p: &Pal, text: &str, max_lines: usize) -> Div {
 
 /// Segmented control; returns the row, `on_pick` gets the chosen value.
 pub fn seg(id: &str, p: &Pal, options: &[(String, String)], current: &str, on_pick: Rc<dyn Fn(String, &mut App)>) -> Div {
+    seg_with(id, p, options, current, &[], on_pick)
+}
+
+/// A segmented control whose `disabled` values show but cannot be picked.
+pub fn seg_with(id: &str, p: &Pal, options: &[(String, String)], current: &str, disabled: &[String], on_pick: Rc<dyn Fn(String, &mut App)>) -> Div {
     let pp = *p;
     div().flex().flex_row().flex_none().p(px(2.)).rounded(px(9.)).bg(p.surface2).border_1().border_color(p.line).gap(px(2.))
         .children(options.iter().map(|(value, label)| {
             let on = value == current;
+            let off = disabled.contains(value);
             let v = value.clone();
             let pick = on_pick.clone();
             div().id(SharedString::from(format!("{id}-{value}"))).h(px(28.)).px(px(12.)).rounded(px(7.)).flex().items_center()
-                .text_size(px(12.5)).font_weight(FontWeight::MEDIUM).cursor_pointer()
-                .text_color(if on { pp.text } else { pp.text2 })
+                .text_size(px(12.5)).font_weight(FontWeight::MEDIUM)
+                .text_color(if on { pp.text } else if off { pp.text3 } else { pp.text2 })
                 .when(on, |d| d.bg(pp.surface).shadow_sm())
-                .hover(move |s| s.text_color(pp.text))
+                .when(!off, |d| d.cursor_pointer().hover(move |s| s.text_color(pp.text)).on_click(move |_, _, cx| pick(v.clone(), cx)))
                 .child(label.clone())
-                .on_click(move |_, _, cx| pick(v.clone(), cx))
         }))
 }
 

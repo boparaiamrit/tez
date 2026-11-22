@@ -105,6 +105,9 @@ fn dispatch(args: &[String]) -> R<()> {
         ["procs"] | ["processes"] => procs(),
         ["logs", name, rest @ ..] => logs(name, rest),
         ["trust", rest @ ..] => trust(rest),
+        ["web"] => web_show(),
+        ["web", "use", name] => web_use(name),
+        ["web", "config"] => { let cfg = Config::load(); web::write_config(&cfg)?; println!("{}", web_config_path(&cfg).display()); Ok(()) }
         ["hosts"] => hosts(false),
         ["hosts", "--elevated"] => hosts(true),
         ["doctor", rest @ ..] => doctor(rest),
@@ -131,6 +134,7 @@ Sites (folders in ~/Sites are served at https://<folder>.test)
   tez sites                             list sites with PHP versions and URLs
   tez domain add admin.app.test [site]  extra domains for multi-domain apps (remove to undo)
   tez trust                             trust HTTPS and add hosts entries (asks for admin once)
+  tez web [use caddy|nginx]             the web server in front of every site (Caddy by default)
 
 PHP
   tez php [list]                        available and installed versions
@@ -230,6 +234,7 @@ fn install_cacert() -> R<()> {
     }
     let mut pem = std::fs::read_to_string(&base)?;
     // Let PHP trust tez's own local HTTPS sites too (Http::get('https://other.test')).
+    let _ = crate::tls::ensure_ca();
     if let Ok(root) = std::fs::read_to_string(paths::local_ca_root()) {
         pem.push_str("\n# tez local certificate authority\n");
         pem.push_str(&root);
@@ -388,6 +393,37 @@ fn stop() -> R<()> {
         std::thread::sleep(Duration::from_millis(150));
     }
     bail!("tez did not stop in time")
+}
+
+fn web_config_path(cfg: &Config) -> std::path::PathBuf {
+    if web::server(cfg) == "nginx" { crate::nginx::conf() } else { paths::caddyfile() }
+}
+
+/// `tez web`: which server runs, which can, and where its config is.
+fn web_show() -> R<()> {
+    let cfg = Config::load();
+    let (ok, why) = crate::nginx::available();
+    let now = web::server(&cfg);
+    println!("{} {}", bold("web server"), if now == "nginx" { format!("Nginx {}", crate::nginx::VERSION) } else { format!("Caddy {}", web::CADDY_VERSION) });
+    println!("  config       {}", web_config_path(&cfg).display());
+    println!("  certificates {}", crate::tls::root_crt().display());
+    if !ok { println!("  {}", dim(&format!("Nginx is not available here: {why}"))); }
+    println!("  {}", dim("switch with: tez web use caddy | tez web use nginx"));
+    Ok(())
+}
+
+/// `tez web use nginx`: switch servers. Sites, HTTPS and PHP stay as they are.
+fn web_use(name: &str) -> R<()> {
+    let name = name.trim().to_ascii_lowercase();
+    if name != "caddy" && name != "nginx" { bail!("the web server is caddy or nginx"); }
+    if name == "nginx" { let (ok, why) = crate::nginx::available(); if !ok { bail!("{why}"); } }
+    let mut cfg = Config::load();
+    cfg.web_server = name.clone();
+    web::install_server(&cfg)?;
+    cfg.save()?;
+    reload_if_running()?;
+    util::ok(&format!("{} serves the sites", if name == "nginx" { "Nginx" } else { "Caddy" }));
+    Ok(())
 }
 
 fn reload_if_running() -> R<()> {
@@ -1093,11 +1129,9 @@ fn trust_root(root: &Path) -> R<()> {
 fn trust(rest: &[&str]) -> R<()> {
     let cfg = Config::load();
     let root = paths::local_ca_root();
-    if !root.exists() {
-        if !api::running() { start()?; }
-        for _ in 0..40 { if root.exists() { break; } std::thread::sleep(Duration::from_millis(250)); }
-        if !root.exists() { bail!("the local certificate authority was not created yet; open https://tez.localhost once and retry"); }
-    }
+    // The elevated copy trusts the root its parent made; it never makes one of its own.
+    if !rest.contains(&"--elevated") { crate::tls::ensure_ca()?; }
+    if !root.exists() { bail!("tez's certificate authority is missing ({})", root.display()); }
     if rest.contains(&"--elevated") || sys::is_elevated() {
         trust_root(&root)?;
         write_hosts_block(&cfg)?;
@@ -1121,7 +1155,7 @@ fn doctor_unix(cfg: &Config) -> R<()> {
     if free < 10 << 30 { util::warn(&format!("{} free on the disk holding {}", util::human_bytes(free), paths::home().display())); }
     else { util::ok(&format!("{} free", util::human_bytes(free))); }
     for (port, what) in [(cfg.http_port, "HTTP"), (cfg.https_port, "HTTPS")] {
-        if !util::port_free(port) && !(api::running() && util::port_open(2019)) {
+        if !util::port_free(port) && !(api::running() && web::running_ports().is_some()) {
             let why = if port < 1024 && cfg!(target_os = "linux") && !sys::is_elevated() { "needs root on Linux" } else { "is in use" };
             util::warn(&format!("port {port} ({what}) {why}; tez uses {} instead", if what == "HTTP" { 8088 } else { 8443 }));
         }
@@ -1154,7 +1188,7 @@ fn doctor(rest: &[&str]) -> R<()> {
     } else { util::ok(&format!("C: has {} free", util::human_bytes(free))); }
     // Ports.
     for (port, what) in [(cfg.http_port, "HTTP"), (cfg.https_port, "HTTPS")] {
-        if !util::port_free(port) && !(api::running() && util::port_open(2019)) {
+        if !util::port_free(port) && !(api::running() && web::running_ports().is_some()) {
             let owner = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-Command", &format!("(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object {{ (Get-Process -Id $_.OwningProcess).Name }})")])
                 .output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();

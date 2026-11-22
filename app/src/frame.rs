@@ -829,7 +829,7 @@ fn settings_sheet(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     let pp = *p;
     let groups: Vec<(&str, Vec<(&str, &str, &str)>)> = vec![
         ("tez", vec![("general", "General", "settings"), ("appearance", "Appearance", "sun"), ("startup", "Startup", "power")]),
-        ("This computer", vec![("https", "HTTPS and hosts", "shield-check"), ("ports", "Ports", "globe"), ("performance", "Performance", "gauge")]),
+        ("This computer", vec![("https", "HTTPS and hosts", "shield-check"), ("ports", "Web server and ports", "globe"), ("performance", "Performance", "gauge")]),
         ("Accounts", vec![("github", "GitHub", "github")]),
         ("About", vec![("updates", "Updates", "download")]),
     ];
@@ -891,7 +891,20 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
             let https = crate::draft(cx, "set:https", s["https_port"].as_u64().map(|x| x.to_string()).unwrap_or_default());
             let hi = text_input(window, cx, "set:http", &http, "80", false, Some(Rc::new(|v, cx| if let Ok(n) = v.trim().parse::<u16>() { crate::queue(cx, "set:http".into(), v.clone(), "/api/settings".into(), json!({ "http_port": n })) })));
             let si = text_input(window, cx, "set:https", &https, "443", false, Some(Rc::new(|v, cx| if let Ok(n) = v.trim().parse::<u16>() { crate::queue(cx, "set:https".into(), v.clone(), "/api/settings".into(), json!({ "https_port": n })) })));
-            ("Ports".into(), "Where the web server listens".into(), div().flex().flex_col().child(group_title(p, "Web server", None))
+            // Caddy or Nginx: Nginx shows greyed out, with the reason, where it cannot run.
+            let now = { let v = txt(&s["web_server"]); if v.is_empty() { "caddy".to_string() } else { v } };
+            let nginx_ok = s["web_servers"]["nginx"]["available"].as_bool().unwrap_or(true);
+            let why = txt(&s["web_servers"]["nginx"]["reason"]);
+            let servers = vec![("caddy".to_string(), "Caddy".to_string()), ("nginx".to_string(), "Nginx".to_string())];
+            let off: Vec<String> = if nginx_ok { Vec::new() } else { vec!["nginx".into()] };
+            let cur = now.clone();
+            let server_seg = seg_with("set-web", p, &servers, &now, &off, Rc::new(move |v, cx| {
+                if v == cur { return; }
+                send(cx, "/api/settings".into(), json!({ "web_server": v }), if v == "nginx" { "Nginx serves the sites now" } else { "Caddy serves the sites now" });
+            }));
+            let server_help = if nginx_ok { "Same sites, names and HTTPS with either. PHP is not touched.".to_string() } else { format!("Nginx is not available here. {why}") };
+            ("Web server and ports".into(), "What serves your sites, and where it listens".into(), div().flex().flex_col().child(group_title(p, "Web server", None))
+                .child(field(p, "Server", Some(server_help), false, server_seg))
                 .child(field(p, "HTTPS port", Some("The port for https:// addresses".into()), false, div().w(px(120.)).child(input_el(&si, true))))
                 .child(field(p, "HTTP port", Some({ let mut c = note.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }), false, div().w(px(120.)).child(input_el(&hi, true)))).into_any_element())
         }
