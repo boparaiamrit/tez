@@ -233,7 +233,8 @@ pub fn adopt(cfg: &Config, site: &Site) -> R<Vec<String>> {
     // Multi-domain apps (Route::domain(config('app.admin_domain'))): serve every *_DOMAIN host.
     let mut domains: Vec<String> = Vec::new();
     for (k, v) in &env {
-        if !k.ends_with("_DOMAIN") || v.is_empty() || v.contains("://") { continue; }
+        // SESSION_DOMAIN is a cookie scope, not a host to serve; "null" means unset.
+        if !k.ends_with("_DOMAIN") || k == "SESSION_DOMAIN" || v.is_empty() || v.contains("://") || v.eq_ignore_ascii_case("null") || v.eq_ignore_ascii_case("(null)") { continue; }
         let host = v.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
         if host.is_empty() || host.contains(['/', ' ']) || !host.chars().any(|c| c.is_ascii_alphabetic()) { continue; }
         if host == "localhost" || host == "127.0.0.1" {
