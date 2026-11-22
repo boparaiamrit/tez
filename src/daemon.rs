@@ -39,6 +39,8 @@ impl Proc {
     pub fn pid(&self) -> Option<u32> { self.child.as_ref().map(|c| c.id()) }
     pub fn uptime(&self) -> u64 { self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0) }
     pub fn memory(&self) -> u64 { self.job.as_ref().map(|j| j.memory()).unwrap_or(0) }
+    /// CPU time used by this process and everything it started, in nanoseconds.
+    pub fn cpu_time(&self) -> Option<u64> { self.job.as_ref().map(|j| j.cpu_time()) }
     pub fn log_path(&self) -> std::path::PathBuf { log_path(&self.spec.name) }
 }
 
@@ -287,6 +289,8 @@ pub fn run() -> R<()> {
     let shared: Shared = Arc::new(Mutex::new(Daemon { procs: Vec::new(), started: SystemTime::now(), notes }));
     shared.lock().unwrap().reconcile(specs);
     sys::on_shutdown_signal(shutdown_from_signal);
+    crate::metrics::start(shared.clone());
+    crate::stats::start(shared.clone());
 
     let ticker = shared.clone();
     std::thread::spawn(move || {

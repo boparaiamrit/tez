@@ -22,6 +22,8 @@ const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
 const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0800;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 const JOB_OBJECT_BASIC_PROCESS_ID_LIST: i32 = 3;
+const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: i32 = 1;
+const TH32CS_SNAPPROCESS: u32 = 0x2;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const PROCESS_VM_READ: u32 = 0x0010;
 const STILL_ACTIVE: u32 = 259;
@@ -73,8 +75,54 @@ struct MemCounters {
     peak_pagefile_usage: usize,
 }
 
+/// CPU time used by every process that has been in a job (live and exited), in 100 ns units.
+#[repr(C)]
+#[derive(Default)]
+struct Accounting {
+    total_user: i64,
+    total_kernel: i64,
+    period_user: i64,
+    period_kernel: i64,
+    page_faults: u32,
+    total_processes: u32,
+    active_processes: u32,
+    terminated_processes: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct MemStatus {
+    length: u32,
+    load: u32,
+    total_phys: u64,
+    avail_phys: u64,
+    total_page: u64,
+    avail_page: u64,
+    total_virtual: u64,
+    avail_virtual: u64,
+    avail_extended: u64,
+}
+
+#[repr(C)]
+struct ProcEntry {
+    size: u32,
+    usage: u32,
+    pid: u32,
+    default_heap: usize,
+    module: u32,
+    threads: u32,
+    parent: u32,
+    priority: i32,
+    flags: u32,
+    exe: [u16; 260],
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GlobalMemoryStatusEx(status: *mut MemStatus) -> i32;
+    fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> HANDLE;
+    fn Process32FirstW(snap: HANDLE, entry: *mut ProcEntry) -> i32;
+    fn Process32NextW(snap: HANDLE, entry: *mut ProcEntry) -> i32;
     fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> HANDLE;
     fn SetInformationJobObject(job: HANDLE, class: i32, info: *const c_void, len: u32) -> i32;
     fn QueryInformationJobObject(job: HANDLE, class: i32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
@@ -174,6 +222,108 @@ impl Job {
 
     /// Working-set memory of every process in the job, in bytes.
     pub fn memory(&self) -> u64 { self.pids().into_iter().map(process_memory).sum() }
+
+    /// CPU time (user + kernel) used by everything that has run in the job, in nanoseconds.
+    pub fn cpu_time(&self) -> u64 {
+        let mut info = Accounting::default();
+        // SAFETY: `info` is a correctly sized, writable buffer for this information class.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.0,
+                JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                &mut info as *mut Accounting as *mut c_void,
+                std::mem::size_of::<Accounting>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 { return 0; }
+        ((info.total_user.max(0) + info.total_kernel.max(0)) as u64).saturating_mul(100)
+    }
+}
+
+/// Physical memory of this computer: (total, available) in bytes.
+pub fn memory_status() -> (u64, u64) {
+    let mut s = MemStatus { length: std::mem::size_of::<MemStatus>() as u32, ..Default::default() };
+    // SAFETY: `s` is sized via `length` as the call requires.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut s) };
+    if ok == 0 { (0, 0) } else { (s.total_phys, s.avail_phys) }
+}
+
+/// Free and total bytes of the volume holding `path`.
+pub fn disk_space(path: &std::path::Path) -> (u64, u64) {
+    use std::os::windows::ffi::OsStrExt;
+    let mut p = path.to_path_buf();
+    while !p.exists() { if !p.pop() { break; } }
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the out pointers are valid or null.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
+    if ok == 0 { (0, 0) } else { (free, total) }
+}
+
+/// The pid of the first running process whose image name matches one of `names` (case-insensitive).
+fn find_process(names: &[&str]) -> Option<u32> {
+    // SAFETY: the snapshot handle is checked and closed; `entry` is sized via `size`.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap.is_null() || snap as isize == -1 { return None; }
+        let mut entry: ProcEntry = std::mem::zeroed();
+        entry.size = std::mem::size_of::<ProcEntry>() as u32;
+        let mut found = None;
+        let mut ok = Process32FirstW(snap, &mut entry);
+        while ok != 0 {
+            let len = entry.exe.iter().position(|&c| c == 0).unwrap_or(entry.exe.len());
+            let exe = String::from_utf16_lossy(&entry.exe[..len]).to_ascii_lowercase();
+            let stem = exe.trim_end_matches(".exe");
+            if names.iter().any(|n| stem == n.to_ascii_lowercase()) { found = Some(entry.pid); break; }
+            ok = Process32NextW(snap, &mut entry);
+        }
+        CloseHandle(snap);
+        found
+    }
+}
+
+/// Memory held by the WSL virtual machine (the vmmemWSL process), or None when WSL is not running.
+/// Windows usually lets a normal user read it; when it does not, `tasklist` reports it.
+pub fn wsl_memory() -> Option<u64> {
+    let pid = find_process(&["vmmemWSL", "vmmem"])?;
+    // SAFETY: handle checked for null and closed; counters buffer is sized via `cb`.
+    let direct = unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() { 0 } else {
+            let mut c = MemCounters { cb: std::mem::size_of::<MemCounters>() as u32, ..Default::default() };
+            let ok = K32GetProcessMemoryInfo(h, &mut c, c.cb);
+            CloseHandle(h);
+            if ok == 0 { 0 } else { c.working_set_size as u64 }
+        }
+    };
+    if direct > 0 { return Some(direct); }
+    for image in ["vmmemWSL", "vmmem"] {
+        let out = Command::new(crate::paths::system32("tasklist.exe"))
+            .args(["/FI", &format!("IMAGENAME eq {image}"), "/FO", "CSV", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .output().ok()?;
+        if let Some(kb) = parse_tasklist_kb(&String::from_utf8_lossy(&out.stdout)) { return Some(kb * 1024); }
+    }
+    None
+}
+
+/// The "Mem Usage" column (KB) of tasklist's CSV output, whatever the locale's digit grouping.
+pub fn parse_tasklist_kb(csv: &str) -> Option<u64> {
+    let line = csv.lines().find(|l| l.starts_with('"'))?;
+    let last = line.trim().trim_end_matches('"').rsplit("\",\"").next()?;
+    let digits: String = last.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Stop every WSL distribution and its virtual machine.
+pub fn wsl_shutdown() -> crate::util::R<()> {
+    let status = Command::new(crate::paths::system32("wsl.exe")).arg("--shutdown").creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() { crate::bail!("wsl --shutdown failed ({status})"); }
+    Ok(())
 }
 
 impl Drop for Job {

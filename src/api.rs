@@ -97,13 +97,24 @@ fn query_param(q: &str, key: &str) -> Option<String> {
     q.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_string()))
 }
 
+/// POST /api/wsl/shutdown: stop WSL and give its memory back (Windows only).
+fn wsl_shutdown(stream: &mut TcpStream) {
+    #[cfg(windows)]
+    match crate::sys::wsl_shutdown() {
+        Ok(()) => json_ok(stream, json!({ "ok": true })),
+        Err(e) => json_err(stream, 500, &e.to_string()),
+    }
+    #[cfg(not(windows))]
+    json_err(stream, 400, "WSL exists only on Windows");
+}
+
 pub fn status_json(shared: &Shared) -> serde_json::Value {
     let cfg = Config::load();
     let d = shared.lock().unwrap();
     let procs: Vec<_> = d.procs.iter().map(|p| json!({
         "name": p.spec.name, "group": p.spec.group, "state": p.state, "pid": p.pid(),
         "restarts": p.restarts, "uptime": p.uptime(), "port": p.spec.port, "url": p.spec.url,
-        "memory": p.memory(), "last_exit": p.last_exit, "wanted": p.wanted,
+        "memory": p.memory(), "cpu": crate::metrics::cpu_of(&p.spec.name), "last_exit": p.last_exit, "wanted": p.wanted,
     })).collect();
     let total_mem: u64 = d.procs.iter().map(|p| p.memory()).sum();
     let notes = d.notes.clone();
@@ -153,7 +164,7 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
             drop(d);
             if found { json_ok(&mut stream, json!({ "ok": true })) } else { json_err(&mut stream, 404, "no such process") }
         }
-        ("POST", ["api", "site", name, action]) => {
+        ("POST", ["api", "site", name, action @ ("up" | "down")]) => {
             let mut cfg = Config::load();
             if sites::find(&cfg, name).is_none() { json_err(&mut stream, 404, "no such site"); return false; }
             match *action {
@@ -201,6 +212,12 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
             let _ = std::fs::write(paths::logs_dir().join("dumps.jsonl"), b"");
             json_ok(&mut stream, json!({ "ok": true }));
         }
+        // ---- resource and site metrics (see metrics.rs and stats.rs)
+        ("GET", ["api", "metrics"]) => json_ok(&mut stream, crate::metrics::json(&query_param(&req.query, "range").unwrap_or_default())),
+        ("GET", ["api", "sites", "metrics"]) => json_ok(&mut stream, crate::stats::sites_json(&query_param(&req.query, "range").unwrap_or_default())),
+        ("GET", ["api", "services", "metrics"]) => json_ok(&mut stream, crate::stats::services_json()),
+        ("POST", ["api", "cache", "clear"]) => json_ok(&mut stream, json!({ "ok": true, "freed": crate::metrics::clear_cache() })),
+        ("POST", ["api", "wsl", "shutdown"]) => wsl_shutdown(&mut stream),
         // ---- settings, jobs, GitHub (see manage.rs)
         ("GET", ["api", "settings"]) => json_ok(&mut stream, manage::settings_get()),
         ("POST", ["api", "settings"]) => reply(&mut stream, body_json(&req).and_then(|b| manage::settings_set(&shared, &b))),

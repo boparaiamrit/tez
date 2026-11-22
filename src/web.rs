@@ -203,6 +203,11 @@ pub fn caddyfile(cfg: &Config) -> String {
         s.push_str(&format!("# {}  ({})\n", site.name, site.path.display()));
         s.push_str(&hosts.join(", "));
         s.push_str(" {\n\ttls internal\n");
+        // A JSON access log per site: the daemon reads it for the dashboard's request numbers.
+        s.push_str(&format!(
+            "\tlog {{\n\t\toutput file \"{}\" {{\n\t\t\troll_size 10MiB\n\t\t\troll_keep 2\n\t\t}}\n\t\tformat json\n\t}}\n",
+            paths::fwd(&crate::stats::access_log(&site.name))
+        ));
         s.push_str(&format!("\troot * \"{}\"\n", paths::fwd(&site.root)));
         s.push_str("\tencode zstd gzip\n");
         if site.php == EMBEDDED_PHP && has_embedded_php() {

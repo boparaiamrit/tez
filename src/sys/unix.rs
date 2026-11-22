@@ -37,6 +37,9 @@ impl Job {
 
     /// Resident memory of every process in the group, in bytes.
     pub fn memory(&self) -> u64 { ps_table().iter().filter(|r| r.pgid == self.0).map(|r| r.rss).sum() }
+
+    /// CPU time used by the group's live processes, in nanoseconds.
+    pub fn cpu_time(&self) -> u64 { ps_table().iter().filter(|r| r.pgid == self.0).map(|r| r.cpu_ns).sum() }
 }
 
 impl Drop for Job {
@@ -51,27 +54,79 @@ fn signal_group(pgid: i32, sig: i32) {
 }
 
 #[derive(Clone)]
-struct Row { pid: u32, pgid: i32, rss: u64 }
+struct Row { pid: u32, pgid: i32, rss: u64, cpu_ns: u64 }
 
 static PS: Mutex<Option<(Instant, Vec<Row>)>> = Mutex::new(None);
 
-/// One `ps` call for every process (pid, group, resident KB), reused for a second.
+/// ps's cumulative CPU time: "[DD-]HH:MM:SS" (Linux) or "M:SS.ss" (macOS), in nanoseconds.
+pub fn parse_cpu_time(s: &str) -> Option<u64> {
+    let (days, rest) = match s.split_once('-') { Some((d, r)) => (d.parse::<u64>().ok()?, r), None => (0, s) };
+    let mut secs = 0f64;
+    for part in rest.split(':') { secs = secs * 60.0 + part.parse::<f64>().ok()?; }
+    Some(((days as f64 * 86400.0 + secs) * 1e9) as u64)
+}
+
+/// One `ps` call for every process (pid, group, resident KB, CPU time), reused for a second.
 fn ps_table() -> Vec<Row> {
     let mut cache = PS.lock().unwrap();
     if let Some((at, rows)) = cache.as_ref() {
         if at.elapsed() < Duration::from_secs(1) { return rows.clone(); }
     }
-    let out = Command::new("ps").args(["-A", "-o", "pid=,pgid=,rss="]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let out = Command::new("ps").args(["-A", "-o", "pid=,pgid=,rss=,time="]).stdin(Stdio::null()).stderr(Stdio::null()).output();
     let rows: Vec<Row> = out.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| {
         let mut it = l.split_whitespace();
         let pid = it.next()?.parse().ok()?;
         let pgid = it.next()?.parse().ok()?;
         let rss: u64 = it.next()?.parse().ok()?;
-        Some(Row { pid, pgid, rss: rss * 1024 })
+        let cpu_ns = it.next().and_then(parse_cpu_time).unwrap_or(0);
+        Some(Row { pid, pgid, rss: rss * 1024, cpu_ns })
     }).collect()).unwrap_or_default();
     *cache = Some((Instant::now(), rows.clone()));
     rows
 }
+
+/// Physical memory of this computer: (total, available) in bytes.
+pub fn memory_status() -> (u64, u64) {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let kb = |key: &str| text.lines().find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024;
+        (kb("MemTotal:"), kb("MemAvailable:"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let run = |prog: &str, args: &[&str]| Command::new(prog).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let total = run("sysctl", &["-n", "hw.memsize"]).trim().parse::<u64>().unwrap_or(0);
+        let vm = run("vm_stat", &[]);
+        (total, parse_vm_stat(&vm))
+    }
+}
+
+/// Free + inactive + speculative pages from macOS `vm_stat`, in bytes.
+pub fn parse_vm_stat(text: &str) -> u64 {
+    let page = text.lines().next().and_then(|l| l.split("page size of ").nth(1))
+        .and_then(|r| r.split_whitespace().next()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(4096);
+    let pages = |key: &str| text.lines().find(|l| l.starts_with(key))
+        .and_then(|l| l.split(':').nth(1)).and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok()).unwrap_or(0);
+    (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative")) * page
+}
+
+/// Free and total bytes of the volume holding `path` (from `df -Pk`).
+pub fn disk_space(path: &std::path::Path) -> (u64, u64) {
+    let mut p = path.to_path_buf();
+    while !p.exists() { if !p.pop() { break; } }
+    let out = Command::new("df").arg("-Pk").arg(&p).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let Ok(out) = out else { return (0, 0) };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cols: Vec<u64> = text.lines().nth(1).map(|l| l.split_whitespace().skip(1).take(3).filter_map(|v| v.parse().ok()).collect()).unwrap_or_default();
+    if cols.len() < 3 { return (0, 0); }
+    (cols[2] * 1024, cols[0] * 1024)
+}
+
+/// WSL is a Windows thing.
+pub fn wsl_memory() -> Option<u64> { None }
 
 pub fn process_memory(pid: u32) -> u64 { ps_table().iter().find(|r| r.pid == pid).map(|r| r.rss).unwrap_or(0) }
 
