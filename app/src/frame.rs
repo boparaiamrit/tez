@@ -584,10 +584,18 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
     let head = |title: &str, sub_t: String, big: String, small: String| div().flex().flex_row().items_start().px(px(18.)).pt(px(16.))
         .child(div().flex_1().flex().flex_col().gap(px(2.)).child(strong(&pp, title.to_string())).child(muted(&pp, sub_t)))
         .child(div().flex().flex_col().items_end().gap(px(2.)).child(div().text_size(px(26.)).child(big)).child(muted(&pp, small)));
-    let cpu_card = cardbox(p).pb(px(14.))
+    // Where the CPU goes right now, the same way the Memory card splits RAM: tez, other apps, idle.
+    let tez_now = cpu.clamp(0., 100.);
+    let cpu_segs = [(tez_now, pp.series[0], "tez"), ((cpu_now - tez_now).max(0.), pp.line2, "Other apps"), ((100. - cpu_now.max(tez_now)).max(0.), pp.surface3, "Idle")];
+    let cpu_card = cardbox(p).pb(px(16.))
         .child(head("CPU", format!("{cores} cores · {range_label}"), format!("{cpu_now:.0}%"), format!("tez {cpu:.1}%")))
         .child(chart(vec![(sys_cpu, pp.text2), (tez_cpu, pp.series[0])], 100., vec![(25., "25%".into()), (50., "50%".into()), (75., "75%".into()), (100., "100%".into())]))
-        .child(legend2("This computer", pp.text2, "tez", pp.series[0]));
+        .child(legend2("This computer", pp.text2, "tez", pp.series[0]))
+        .when(cores > 0, |d| d.child(div().mt_auto().flex().flex_col().gap(px(8.)).px(px(18.)).pt(px(14.))
+            .child(div().flex().flex_row().h(px(8.)).rounded(px(4.)).overflow_hidden().gap(px(2.))
+                .children(cpu_segs.iter().filter(|(v, _, _)| *v > 0.05).map(|(v, c, _)| div().h_full().w(relative(*v as f32 / 100.)).bg(*c))))
+            .child(div().flex().flex_row().flex_wrap().gap(px(18.)).text_size(px(13.5)).text_color(pp.text2)
+                .children(cpu_segs.iter().map(|(v, c, l)| div().flex().flex_row().items_center().gap(px(6.)).child(div().size(px(8.)).rounded(px(2.)).bg(*c)).child(format!("{l} {v:.1}%")))))));
     let gib = (1u64 << 30) as f64;
     let ram_max = (total as f64).max(gib);
     let step = if ram_max > 48. * gib { 16. * gib } else if ram_max > 24. * gib { 8. * gib } else { 4. * gib };
@@ -598,7 +606,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
         .child(head("Memory (RAM)", format!("{} in all · {range_label}", mb(total)), format!("{} used", mb(used_now)), format!("{} free", mb(avail))))
         .child(chart(vec![(used, pp.text2), (tez_used, pp.series[0])], ram_max, ram_ticks))
         .child(legend2("Used by everything", pp.text2, "tez", pp.series[0]))
-        .when(total > 0, |d| d.child(div().flex().flex_col().gap(px(8.)).px(px(18.)).pt(px(14.))
+        .when(total > 0, |d| d.child(div().mt_auto().flex().flex_col().gap(px(8.)).px(px(18.)).pt(px(14.))
             .child(div().flex().flex_row().h(px(8.)).rounded(px(4.)).overflow_hidden().gap(px(2.))
                 .children(segs.iter().filter(|(v, _, _)| *v > 0).map(|(v, c, _)| div().h_full().w(relative(*v as f32 / total as f32)).bg(*c))))
             .child(div().flex().flex_row().flex_wrap().gap(px(18.)).text_size(px(13.5)).text_color(pp.text2)
@@ -657,7 +665,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
             .child(card_header(p, sid(format!("svh-{name}")), pages::service_icon(&kind), &title, &status, state_tone(&st),
                 Some(switch(sid(format!("svs-{name}")), p, on).on_click(move |_, _, cx| send(cx, format!("/api/service/{n2}"), json!({ "enabled": !on }), if on { "Stopped; data kept" } else { "Starting" })).into_any_element()), None))
             .child(stat_strip(p, vec![(mb(x["memory"].as_u64().unwrap_or(0)), "memory", None), (format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)), "CPU", None), (key_stat.0, key_stat.1, None)]))
-            .child(div().flex().flex_row().px(px(8.)).py(px(6.)).child(text_btn(sid(format!("svd-{name}")), p, "Details").on_click(move |_, _, cx| { cx.global_mut::<Tez>().svc_sel = sel.clone(); go(cx, Page::Services); }))).into_any_element());
+            .child(div().mt_auto().flex().flex_row().px(px(8.)).py(px(6.)).child(text_btn(sid(format!("svd-{name}")), p, "Details").on_click(move |_, _, cx| { cx.global_mut::<Tez>().svc_sel = sel.clone(); go(cx, Page::Services); }))).into_any_element());
     }
     out = out.child(div().flex().flex_col().gap(px(14.)).child(h2(p, "Services")).child(grid_of(sgrid, 3)));
     out.into_any_element()
@@ -1016,7 +1024,7 @@ fn process_rows(p: &Pal, name: &str, d: &Value, live: &[Value]) -> AnyElement {
                         (format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)), "CPU", None),
                         (x["restarts"].as_u64().unwrap_or(0).to_string(), "restarts", if x["restarts"].as_u64().unwrap_or(0) > 0 { Some(pp.amber) } else { None }),
                     ]))
-                    .child(div().flex().flex_row().gap(px(2.)).px(px(8.)).py(px(6.))
+                    .child(div().mt_auto().flex().flex_row().gap(px(2.)).px(px(8.)).py(px(6.))
                         .when_some(dash, |d, u| d.child(text_btn(sid(format!("pd-{pn}")), &pp, "Dashboard").on_click(move |_, _, _| api::open_url(&u))))
                         .child(text_btn(sid(format!("pr-{pn}")), p, "Restart").on_click(move |_, _, cx| send(cx, format!("/api/proc/{full}/restart"), json!({}), "Restarting")))
                         .child(text_btn(sid(format!("pl-{pn}")), p, "Log").on_click(move |_, _, cx| { set_local(cx, &format!("log:{site2}"), p3.clone()); cx.global_mut::<Tez>().site_tab = "logs".into(); refresh_now(cx, false); }))).into_any_element());
@@ -1040,17 +1048,10 @@ fn process_rows(p: &Pal, name: &str, d: &Value, live: &[Value]) -> AnyElement {
     g.into_any_element()
 }
 /// Cards in fixed columns, so a short last row keeps the same card width.
+/// Cards in equal columns. A CSS grid stretches every card in a row to the tallest one, so cards
+/// side by side line up top and bottom; a short last row keeps its empty cells.
 fn grid_of(items: Vec<AnyElement>, cols: usize) -> Div {
-    let mut out = div().flex().flex_col().gap(px(14.));
-    let mut it = items.into_iter().peekable();
-    while it.peek().is_some() {
-        let mut row = div().flex().flex_row().gap(px(14.)).items_start();
-        for _ in 0..cols {
-            row = match it.next() { Some(e) => row.child(div().flex_1().min_w(px(0.)).child(e)), None => row.child(div().flex_1()) };
-        }
-        out = out.child(row);
-    }
-    out
+    div().grid().grid_cols(cols.max(1) as u16).gap(px(14.)).children(items)
 }
 /// A card per site (Home and the Sites page).
 fn site_cards(p: &Pal, cx: &App) -> AnyElement {
@@ -1084,7 +1085,7 @@ fn site_cards(p: &Pal, cx: &App) -> AnyElement {
                 (if has_req { mm["p95_ms"].as_f64().filter(|v| *v > 0.).map(ms).unwrap_or("—".into()) } else { "—".into() }, "p95 response", None),
                 (if has_req { format!("{errs:.0}") } else { "—".into() }, "errors, 1 h", if errs > 0. { Some(pp.red) } else { None }),
             ]))
-            .child(div().flex().flex_row().items_center().gap(px(2.)).px(px(8.)).py(px(6.))
+            .child(div().mt_auto().flex().flex_row().items_center().gap(px(2.)).px(px(8.)).py(px(6.))
                 .child(text_btn(sid(format!("hco-{name}")), p, "Open site").on_click(move |_, _, _| api::open_url(&url)))
                 .when_some(horizon, |d, u| d.child(text_btn(sid(format!("hch-{name}")), &pp, "Horizon").on_click(move |_, _, _| api::open_url(&u))))
                 .child(text_btn(sid(format!("hct-{name}")), p, "Terminal").on_click(move |_, _, _| api::open_terminal(&path)))

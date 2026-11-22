@@ -76,6 +76,7 @@ jobs:
           app=dist/Tez.app
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/tez-app target/release/tez "$app/Contents/MacOS/"
+          cp app/assets/icon/tez.icns "$app/Contents/Resources/AppIcon.icns"
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -85,6 +86,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>dev.tez.app</string>
             <key>CFBundleExecutable</key><string>tez-app</string>
             <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
             <key>CFBundleShortVersionString</key><string>${v#v}</string>
             <key>CFBundleVersion</key><string>${v#v}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
@@ -101,7 +103,9 @@ jobs:
           v="${GITHUB_REF_NAME}"
           mkdir -p dist/tez
           cp target/release/tez target/release/tez-app README.md dist/tez/
-          printf '[Desktop Entry]\nName=tez\nComment=Fast native Laravel development\nExec=tez-app\nType=Application\nCategories=Development;\n' > dist/tez/tez.desktop
+          cp app/assets/icon/tez.png dist/tez/tez.png
+          # Icon=tez finds tez.png once it is copied to ~/.local/share/icons/hicolor/512x512/apps/.
+          printf '[Desktop Entry]\nName=tez\nComment=Fast native Laravel development\nExec=tez-app\nIcon=tez\nType=Application\nCategories=Development;\n' > dist/tez/tez.desktop
           tar -czf "tez-$v-${{ matrix.name }}.tar.gz" -C dist tez
 
       - name: Publish

@@ -19,44 +19,12 @@ pub struct Tray {
     shown_sites: Vec<String>,
 }
 
-/// A 32x32 icon drawn in code: a violet rounded square with a white lightning bolt ("tez" = fast).
-/// The macOS menu bar wants a template image instead: the bolt alone, which macOS tints.
+/// The tray icon, 32x32 RGBA drawn by scripts/icons.py: the violet tile with the white bolt. The
+/// macOS menu bar wants a template image instead: the bolt alone, which macOS tints to match.
 fn icon() -> Icon {
-    const N: usize = 32;
-    let template = cfg!(target_os = "macos");
-    let mut rgba = vec![0u8; N * N * 4];
-    let bolt = [(18.0, 4.0), (8.0, 18.0), (15.0, 18.0), (12.0, 28.0), (24.0, 13.0), (17.0, 13.0), (20.0, 4.0)];
-    let inside = |x: f32, y: f32| {
-        let mut c = false;
-        let mut j = bolt.len() - 1;
-        for i in 0..bolt.len() {
-            let (xi, yi) = bolt[i];
-            let (xj, yj) = bolt[j];
-            if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) { c = !c; }
-            j = i;
-        }
-        c
-    };
-    for y in 0..N {
-        for x in 0..N {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // rounded square, radius 7
-            let r = 7.0f32;
-            let dx = (fx - fx.clamp(r, N as f32 - r)).abs();
-            let dy = (fy - fy.clamp(r, N as f32 - r)).abs();
-            let d = (dx * dx + dy * dy).sqrt();
-            let alpha = ((r + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
-            let i = (y * N + x) * 4;
-            if template {
-                if inside(fx, fy) { rgba[i] = 0; rgba[i + 1] = 0; rgba[i + 2] = 0; rgba[i + 3] = 255; }
-                continue;
-            }
-            if alpha == 0 { continue; }
-            let (cr, cg, cb) = if inside(fx, fy) { (255, 255, 255) } else { (110, 76, 240) };
-            rgba[i] = cr; rgba[i + 1] = cg; rgba[i + 2] = cb; rgba[i + 3] = alpha;
-        }
-    }
-    Icon::from_rgba(rgba, N as u32, N as u32).expect("tray icon")
+    const N: u32 = 32;
+    let rgba: &[u8] = if cfg!(target_os = "macos") { include_bytes!("../assets/icon/tray-template.rgba") } else { include_bytes!("../assets/icon/tray.rgba") };
+    Icon::from_rgba(rgba.to_vec(), N, N).expect("tray icon")
 }
 
 impl Tray {
