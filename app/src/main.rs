@@ -504,7 +504,9 @@ fn main() {
             });
         }
         Err(_) => {
-            let _ = std::net::TcpStream::connect(("127.0.0.1", INSTANCE_PORT));
+            // tez is already running. A background start (tez start, sign-in) stays silent; only a
+            // launch the user asked for brings the existing window forward.
+            if !std::env::args().any(|a| a == "--background") { let _ = std::net::TcpStream::connect(("127.0.0.1", INSTANCE_PORT)); }
             return;
         }
     }

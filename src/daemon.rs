@@ -166,7 +166,8 @@ impl Daemon {
                     p.restarts += 1;
                     if p.wanted {
                         p.state = if p.restarts > 8 { State::Failed } else { State::Backoff };
-                        p.next_start = if p.state == State::Failed { Some(now + Duration::from_secs(60)) } else { Some(now + backoff(p.restarts)) };
+                        // A process that keeps failing stays stopped until someone restarts it; no endless loop.
+                        p.next_start = if p.state == State::Failed { None } else { Some(now + backoff(p.restarts)) };
                     } else {
                         p.state = State::Stopped;
                     }

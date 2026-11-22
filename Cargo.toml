@@ -1,6 +1,6 @@
 [package]
 name = "tez"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A fast, native Laravel development environment for Windows: every PHP version, PostgreSQL with TimescaleDB, Redis, Meilisearch, Mailpit, S3 and Horizon, from one binary."
 license = "MIT"

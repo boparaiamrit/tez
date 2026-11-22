@@ -70,7 +70,6 @@ fn titlebar(p: &Pal, cx: &App) -> Div {
     let open = t.menu_open.clone();
     let pp = *p;
     let mut bar = div().h(px(44.)).flex_none().flex().flex_row().items_center().gap(px(4.)).pl(px(if cfg!(target_os = "macos") { 82. } else { 10. }))
-        .window_control_area(WindowControlArea::Drag)
         .child(icon_btn("tb-side", p, "panel-left", false, false).on_click(|_, _, cx| { let t = cx.global_mut::<Tez>(); t.side_hidden = !t.side_hidden; cx.refresh_windows(); }))
         .child(icon_btn("tb-back", p, "chevron-left", !can_back, false).on_click(|_, _, cx| {
             let t = cx.global_mut::<Tez>();
@@ -95,7 +94,9 @@ fn titlebar(p: &Pal, cx: &App) -> Div {
             bar = bar.child(m);
         }
     }
-    bar = bar.child(div().flex_1().h_full());
+    // Only the empty stretch drags the window; buttons and menus keep their clicks.
+    bar = bar.child(div().id("tb-drag").flex_1().h_full().window_control_area(WindowControlArea::Drag)
+        .when(!cfg!(windows), |d| d.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())));
     if cfg!(windows) {
         let wc = |id: &str, ic: &str, area: WindowControlArea, close: bool| {
             div().id(sid(id.to_string())).w(px(46.)).h_full().flex().items_center().justify_center().window_control_area(area)
@@ -168,7 +169,7 @@ fn menu_popover(p: &Pal, key: &str, cx: &App) -> Div {
     }
     let pp = *p;
     let k = key.to_string();
-    div().occlude().mt(px(4.)).min_w(px(260.)).p(px(6.)).rounded(px(14.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
+    div().occlude().mt(px(if key == "status" { 4. } else { 40. })).min_w(px(260.)).p(px(6.)).rounded(px(14.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
         .on_mouse_down_out(move |_, _, cx| { let t = cx.global_mut::<Tez>(); if t.menu_open.as_deref() == Some(k.as_str()) { t.menu_open = None; cx.refresh_windows(); } })
         .children(items.into_iter().enumerate().map(move |(i, it)| {
             let run = it.run.clone();
@@ -248,7 +249,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 let m = &sm[name];
                 if m.is_null() { return None; }
                 let rpm = m["rpm"].as_f64().unwrap_or(0.);
-                if rpm <= 0.0 { return Some("idle".into()); }
+                if rpm <= 0.0 { return None; }
                 m["p95_ms"].as_f64().map(ms)
             };
             if !running.is_empty() {
@@ -355,7 +356,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     } else {
         match page {
             Page::Overview => home(p, cx),
-            Page::Sites => pages::sites_page(p, cx),
+            Page::Sites => div().flex().flex_col().gap(px(30.)).child(div().flex().flex_col().gap(px(8.)).child(h1(p, "Sites")).child(sub(p, "Every folder in your Sites folders, at name.test and name.localhost."))).child(site_cards(p, cx)).into_any_element(),
             Page::Site(name) => site_view(p, &name, window, cx),
             Page::NewSite => pages::new_site(p, window, cx),
             Page::Services => pages::services_page(p, window, cx),
@@ -370,7 +371,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
         .child(div().h(px(64.)).flex_none().relative().flex().items_center().justify_center()
             .when_some(seg_el, |d, s| d.child(s))
             .child(div().absolute().right(px(14.)).top(px(15.)).flex().flex_row().gap(px(8.)).children(right)))
-        .child(div().id(sid(format!("panel-scroll-{:?}", tez(cx).page))).flex_1().min_h(px(0.)).overflow_y_scroll()
+        .child(div().id(sid(format!("panel-scroll-{:?}-{}", tez(cx).page, tez(cx).side_hidden))).flex_1().min_h(px(0.)).overflow_y_scroll()
             .child(div().w_full().px(px(40.)).pt(px(6.)).pb(px(56.)).flex().flex_col().items_center()
                 .child(div().w_full().max_w(px(1000.)).flex().flex_col().gap(px(30.)).child(body))))
         .into_any_element()
@@ -394,37 +395,34 @@ fn pill_seg(id: &str, p: &Pal, options: &[(&str, &str)], current: &str, on_pick:
 
 // ------------------------------------------------------------------ charts
 
-/// Stacked areas (memory by group). `rows` are oldest first; values in bytes.
-fn stacked_chart(p: &Pal, rows: Vec<[f64; 4]>, hover: Option<f32>, cell: Rc<Cell<Option<Bounds<Pixels>>>>) -> impl IntoElement {
+/// Stacked areas (memory by group): soft bands with a clean line on top of each, round gridlines.
+fn stacked_chart(p: &Pal, rows: Vec<[f64; 4]>, scale: f64, ticks: Vec<f64>, hover: Option<f32>, cell: Rc<Cell<Option<Bounds<Pixels>>>>) -> impl IntoElement {
     let pp = *p;
     let c2 = cell.clone();
     let n = rows.len();
-    let max = rows.iter().map(|r| r.iter().sum::<f64>()).fold(0., f64::max).max(1.) * 1.15;
-    let rows2 = rows.clone();
     canvas(move |b, _, _| b, move |b, _, window, _| {
         c2.set(Some(b));
         let (x0, y0, w, h) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
-        for frac in [0.25f32, 0.5, 0.75] {
-            window.paint_quad(fill(Bounds::new(point(px(x0), px(y0 + h * frac)), size(px(w), px(1.))), pp.line));
+        for t in &ticks {
+            let y = y0 + h - (*t / scale) as f32 * h;
+            window.paint_quad(fill(Bounds::new(point(px(x0), px(y)), size(px(w), px(1.))), pp.line));
         }
         window.paint_quad(fill(Bounds::new(point(px(x0), px(y0 + h - 1.)), size(px(w), px(1.))), pp.line2));
         if n < 2 { return; }
         let xs: Vec<f32> = (0..n).map(|i| x0 + w * i as f32 / (n - 1) as f32).collect();
         let mut below = vec![y0 + h; n];
         for k in 0..4 {
-            let mut top = below.clone();
-            for i in 0..n { top[i] = below[i] - (rows2[i][k] / max) as f32 * h; }
+            let top: Vec<f32> = (0..n).map(|i| below[i] - (rows[i][k] / scale) as f32 * h).collect();
             let mut pb = PathBuilder::fill();
             pb.move_to(point(px(xs[0]), px(top[0])));
             for i in 1..n { pb.line_to(point(px(xs[i]), px(top[i]))); }
             for i in (0..n).rev() { pb.line_to(point(px(xs[i]), px(below[i]))); }
             pb.close();
-            if let Ok(path) = pb.build() { window.paint_path(path, pp.series[k]); }
-            // A 2 px gap in the panel colour between layers.
-            let mut sb = PathBuilder::stroke(px(2.));
+            if let Ok(path) = pb.build() { window.paint_path(path, pp.series[k].opacity(0.28)); }
+            let mut sb = PathBuilder::stroke(px(1.5));
             sb.move_to(point(px(xs[0]), px(top[0])));
             for i in 1..n { sb.line_to(point(px(xs[i]), px(top[i]))); }
-            if let Ok(path) = sb.build() { window.paint_path(path, pp.bg); }
+            if let Ok(path) = sb.build() { window.paint_path(path, pp.series[k]); }
             below = top;
         }
         if let Some(f) = hover {
@@ -433,7 +431,6 @@ fn stacked_chart(p: &Pal, rows: Vec<[f64; 4]>, hover: Option<f32>, cell: Rc<Cell
         }
     }).size_full()
 }
-
 /// Lines (response time p50 and p95), values in ms.
 fn line_chart(p: &Pal, lines: Vec<(Vec<f64>, Hsla)>) -> impl IntoElement {
     let pp = *p;
@@ -558,6 +555,10 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
     let series = arr(&m["series"]);
     let first = series.iter().position(|s| s["php"].as_f64().unwrap_or(0.) + s["services"].as_f64().unwrap_or(0.) > 0.).unwrap_or(0);
     let series: Vec<Value> = series[first..].to_vec();
+    let totals: Vec<f64> = series.iter().map(|s| ["php", "sites", "services", "web"].iter().map(|k| s[*k].as_f64().unwrap_or(0.)).sum()).collect();
+    let median = { let mut v = totals.clone(); v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)); v.get(v.len() / 2).copied().unwrap_or(0.) };
+    let warm = totals.iter().position(|t| *t >= median * 0.7).unwrap_or(0);
+    let series: Vec<Value> = series[warm..].to_vec();
     let rows: Vec<[f64; 4]> = series.iter().map(|s| [s["php"].as_f64().unwrap_or(0.), s["sites"].as_f64().unwrap_or(0.), s["services"].as_f64().unwrap_or(0.), s["web"].as_f64().unwrap_or(0.)]).collect();
     let group_now = |f: &dyn Fn(&str) -> bool| -> u64 { procs.iter().filter(|x| f(&txt(&x["group"]))).filter_map(|x| x["memory"].as_u64()).sum() };
     let now_vals = [group_now(&|g| g == "php"), group_now(&|g| g.starts_with("site:")), group_now(&|g| g == "service"), group_now(&|g| g == "web")];
@@ -569,6 +570,11 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
     let range_label = match range.as_str() { "15m" => "last 15 minutes", "24h" => "last 24 hours", _ => "last hour" };
     let hover = t.hover_x;
     let cell: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+    let peak = rows.iter().map(|r| r.iter().sum::<f64>()).fold(0., f64::max).max(1.);
+    let gib = (1u64 << 30) as f64;
+    let step = [0.25 * gib, 0.5 * gib, gib, 2. * gib, 4. * gib, 8. * gib, 16. * gib].into_iter().find(|s| peak / s <= 4.).unwrap_or(16. * gib);
+    let scale = ((peak / step).floor() + 1.) * step;
+    let ticks: Vec<f64> = (1..).map(|k| k as f64 * step).take_while(|v| *v < scale + 1.).collect();
     let chart_area: AnyElement = if rows.len() >= 2 {
         let c3 = cell.clone();
         let tip = hover.map(|f| {
@@ -587,14 +593,14 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
                 }
             })
             .on_hover(|h, _, cx| if !*h { cx.global_mut::<Tez>().hover_x = None; cx.refresh_windows(); })
-            .child(stacked_chart(p, rows.clone(), hover, cell.clone()))
-            .child(div().absolute().left(px(-4.)).top(px(-18.)).text_size(px(12.)).text_color(pp.text3).child(mb((rows.iter().map(|r| r.iter().sum::<f64>()).fold(0., f64::max) * 1.15) as u64)))
-            .child(div().absolute().left_0().bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child(series.first().and_then(|s| s["t"].as_u64()).map(|t0| format!("{} ago", ago(m["now"].as_u64().unwrap_or(t0).saturating_sub(t0)))).unwrap_or_default()))
+            .child(div().absolute().left(px(56.)).top_0().bottom_0().right_0().child(stacked_chart(p, rows.clone(), scale, ticks.clone(), hover, cell.clone())))
+            .children(ticks.iter().map(|t| div().absolute().left_0().w(px(48.)).top(relative(1. - (*t / scale) as f32)).mt(px(-9.)).text_size(px(12.)).text_color(pp.text3).child(mb(*t as u64))))
+            .child(div().absolute().left(px(56.)).bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child(series.first().and_then(|s| s["t"].as_u64()).map(|t0| format!("{} ago", ago(m["now"].as_u64().unwrap_or(t0).saturating_sub(t0)))).unwrap_or_default()))
             .child(div().absolute().right_0().bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child("now"))
             .when_some(tip, |d, (f, r, when)| {
                 let total: f64 = r.iter().sum();
                 let left = if f > 0.6 { relative(f - 0.28) } else { relative(f + 0.02) };
-                d.child(div().absolute().top(px(6.)).left(left).w(px(220.)).p(px(12.)).rounded(px(12.)).bg(pp.surface2).border_1().border_color(pp.line2).shadow_lg()
+                d.child(div().absolute().top(px(6.)).left(left).ml(px(56.)).w(px(220.)).p(px(12.)).rounded(px(12.)).bg(pp.surface2).border_1().border_color(pp.line2).shadow_lg()
                     .flex().flex_col().gap(px(4.)).text_size(px(13.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{when} · {}", mb(total as u64))))
                     .children((0..4).map(|k| div().flex().flex_row().justify_between().text_color(pp.text2).child(labels[k]).child(mb(r[k] as u64)))))
@@ -633,42 +639,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
             .child(text_btn("mc-clear", &pp, "Clear").on_click(|_, _, cx| send(cx, "/api/cache/clear".into(), json!({}), "Cleared the download cache")))));
     out = out.child(div().flex().flex_row().gap(px(14.)).items_start().child(mem_card.flex_1().min_w(px(0.))).child(machine_card.flex_none().w(px(320.))));
 
-    // Sites as cards.
-    let sm = t.site_metrics["sites"].clone();
-    let sites = arr(&t.status["sites"]);
-    let mut grid: Vec<AnyElement> = Vec::new();
-    for s in &sites {
-        let name = txt(&s["name"]);
-        let mm = sm[&name].clone();
-        let live: Vec<&Value> = procs.iter().filter(|x| txt(&x["group"]) == format!("site:{name}")).collect();
-        let up_cfg = s["up"].as_bool().unwrap_or(false);
-        let running = live.iter().any(|x| x["state"] == "running");
-        let declared = s["processes"].as_object().map(|o| !o.is_empty()).unwrap_or(false);
-        let mem: u64 = live.iter().filter_map(|x| x["memory"].as_u64()).sum();
-        let rpm = mm["rpm"].as_f64().unwrap_or(0.);
-        let has_req = arr(&mm["series"]).iter().any(|x| x["req"].as_f64().unwrap_or(0.) > 0.);
-        let errs: f64 = arr(&mm["series"]).iter().filter_map(|x| x["e5xx"].as_f64()).sum();
-        let status = if running { format!("Running · PHP {}", txt(&s["php"])) } else if declared { format!("Served · processes off · PHP {}", txt(&s["php"])) } else { format!("Served · PHP {}", txt(&s["php"])) };
-        let (url, path) = (txt(&s["url"]), txt(&s["path"]));
-        let horizon = live.iter().find(|x| txt(&x["name"]).ends_with("/horizon")).map(|x| txt(&x["url"])).filter(|u| !u.is_empty());
-        let n2 = name.clone();
-        let ctl = if declared { Some(switch(sid(format!("hcs-{name}")), p, up_cfg).on_click(move |_, _, cx| send(cx, format!("/api/site/{n2}/{}", if up_cfg { "down" } else { "up" }), json!({}), if up_cfg { "Stopping processes" } else { "Starting processes" })).into_any_element()) } else { None };
-        grid.push(cardbox(p)
-            .child(card_header(p, sid(format!("hc-{name}")), "folder", &name, &status, if running { Tone::Ok } else { Tone::Neutral }, ctl, Some(Page::Site(name.clone()))))
-            .child(stat_strip(p, vec![
-                (if has_req { format!("{rpm:.0} / min") } else { "—".into() }, "requests", None),
-                (if has_req { mm["p95_ms"].as_f64().filter(|v| *v > 0.).map(ms).unwrap_or("—".into()) } else { "—".into() }, "p95 response", None),
-                (if has_req { format!("{errs:.0}") } else { "—".into() }, "errors, 1 h", if errs > 0. { Some(pp.red) } else { None }),
-            ]))
-            .child(div().flex().flex_row().items_center().gap(px(2.)).px(px(8.)).py(px(6.))
-                .child(text_btn(sid(format!("hco-{name}")), p, "Open site").on_click(move |_, _, _| api::open_url(&url)))
-                .when_some(horizon, |d, u| d.child(text_btn(sid(format!("hch-{name}")), &pp, "Horizon").on_click(move |_, _, _| api::open_url(&u))))
-                .child(text_btn(sid(format!("hct-{name}")), p, "Terminal").on_click(move |_, _, _| api::open_terminal(&path)))
-                .child(div().flex_1())
-                .child(div().pr(px(10.)).text_size(px(13.5)).text_color(pp.text3).child(if mem > 0 { mb(mem) } else { "PHP pool only".into() }))).into_any_element());
-    }
-    if sites.is_empty() { grid.push(muted(p, "No sites yet. Add one from the list on the left.").into_any_element()); }
-    out = out.child(div().flex().flex_col().gap(px(14.)).child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Sites")).child(muted(p, format!("{} in your Sites folders", sites.len())))).child(grid_of(grid, 2)));
+    out = out.child(site_cards(p, cx));
     // Services as cards.
     let svc_meta = arr(&t.services["services"]);
     let smx = t.svc_metrics.clone();
@@ -892,7 +863,7 @@ fn settings_sheet(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     div().absolute().top_0().left_0().size_full().occlude()
         .child(div().id("sheet-dim").absolute().top_0().left_0().size_full().bg(rgba(0x0000008c))
             .on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = false; cx.refresh_windows(); }))
-        .child(div().absolute().top(px(56.)).bottom(px(36.)).left(px(56.)).right(px(56.)).flex().flex_row().bg(p.bg).border_1().border_color(p.line2).rounded(px(18.)).shadow_lg().overflow_hidden()
+        .child(div().id("sheet").occlude().absolute().top(px(56.)).bottom(px(36.)).left(px(56.)).right(px(56.)).flex().flex_row().bg(p.bg).border_1().border_color(p.line2).rounded(px(18.)).shadow_lg().overflow_hidden()
             .child(nav)
             .child(div().id("sheet-body").flex_1().min_w(px(0.)).relative().overflow_y_scroll()
                 .child(div().absolute().right(px(18.)).top(px(18.)).child(icon_btn("sheet-close", p, "x", false, false).on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = false; cx.refresh_windows(); })))
@@ -929,8 +900,8 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
             let hi = text_input(window, cx, "set:http", &http, "80", false, Some(Rc::new(|v, cx| if let Ok(n) = v.trim().parse::<u16>() { crate::queue(cx, "set:http".into(), v.clone(), "/api/settings".into(), json!({ "http_port": n })) })));
             let si = text_input(window, cx, "set:https", &https, "443", false, Some(Rc::new(|v, cx| if let Ok(n) = v.trim().parse::<u16>() { crate::queue(cx, "set:https".into(), v.clone(), "/api/settings".into(), json!({ "https_port": n })) })));
             ("Ports".into(), "Where the web server listens".into(), div().flex().flex_col().child(group_title(p, "Web server", None))
-                .child(field(p, "HTTPS port", Some(note), false, div().w(px(120.)).child(input_el(&si, true))))
-                .child(field(p, "HTTP port", None, false, div().w(px(120.)).child(input_el(&hi, true)))).into_any_element())
+                .child(field(p, "HTTPS port", Some("The port for https:// addresses".into()), false, div().w(px(120.)).child(input_el(&si, true))))
+                .child(field(p, "HTTP port", Some({ let mut c = note.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }), false, div().w(px(120.)).child(input_el(&hi, true)))).into_any_element())
         }
         "performance" => {
             let workers = crate::draft(cx, "set:workers", s["php_workers"].as_u64().map(|x| x.to_string()).unwrap_or_default());
@@ -1075,4 +1046,46 @@ fn grid_of(items: Vec<AnyElement>, cols: usize) -> Div {
         out = out.child(row);
     }
     out
+}
+/// A card per site (Home and the Sites page).
+fn site_cards(p: &Pal, cx: &App) -> AnyElement {
+    let t = tez(cx);
+    let procs = arr(&t.status["procs"]);
+    let pp = *p;
+    // Sites as cards.
+    let sm = t.site_metrics["sites"].clone();
+    let sites = arr(&t.status["sites"]);
+    let mut grid: Vec<AnyElement> = Vec::new();
+    for s in &sites {
+        let name = txt(&s["name"]);
+        let mm = sm[&name].clone();
+        let live: Vec<&Value> = procs.iter().filter(|x| txt(&x["group"]) == format!("site:{name}")).collect();
+        let up_cfg = s["up"].as_bool().unwrap_or(false);
+        let running = live.iter().any(|x| x["state"] == "running");
+        let declared = s["processes"].as_object().map(|o| !o.is_empty()).unwrap_or(false);
+        let mem: u64 = live.iter().filter_map(|x| x["memory"].as_u64()).sum();
+        let rpm = mm["rpm"].as_f64().unwrap_or(0.);
+        let has_req = arr(&mm["series"]).iter().any(|x| x["req"].as_f64().unwrap_or(0.) > 0.);
+        let errs: f64 = arr(&mm["series"]).iter().filter_map(|x| x["e5xx"].as_f64()).sum();
+        let status = if running { format!("Running · PHP {}", txt(&s["php"])) } else if declared { format!("Served · processes off · PHP {}", txt(&s["php"])) } else { format!("Served · PHP {}", txt(&s["php"])) };
+        let (url, path) = (txt(&s["url"]), txt(&s["path"]));
+        let horizon = live.iter().find(|x| txt(&x["name"]).ends_with("/horizon")).map(|x| txt(&x["url"])).filter(|u| !u.is_empty());
+        let n2 = name.clone();
+        let ctl = if declared { Some(switch(sid(format!("hcs-{name}")), p, up_cfg).on_click(move |_, _, cx| send(cx, format!("/api/site/{n2}/{}", if up_cfg { "down" } else { "up" }), json!({}), if up_cfg { "Stopping processes" } else { "Starting processes" })).into_any_element()) } else { None };
+        grid.push(cardbox(p)
+            .child(card_header(p, sid(format!("hc-{name}")), "folder", &name, &status, if running { Tone::Ok } else { Tone::Neutral }, ctl, Some(Page::Site(name.clone()))))
+            .child(stat_strip(p, vec![
+                (if has_req { format!("{rpm:.0} / min") } else { "—".into() }, "requests", None),
+                (if has_req { mm["p95_ms"].as_f64().filter(|v| *v > 0.).map(ms).unwrap_or("—".into()) } else { "—".into() }, "p95 response", None),
+                (if has_req { format!("{errs:.0}") } else { "—".into() }, "errors, 1 h", if errs > 0. { Some(pp.red) } else { None }),
+            ]))
+            .child(div().flex().flex_row().items_center().gap(px(2.)).px(px(8.)).py(px(6.))
+                .child(text_btn(sid(format!("hco-{name}")), p, "Open site").on_click(move |_, _, _| api::open_url(&url)))
+                .when_some(horizon, |d, u| d.child(text_btn(sid(format!("hch-{name}")), &pp, "Horizon").on_click(move |_, _, _| api::open_url(&u))))
+                .child(text_btn(sid(format!("hct-{name}")), p, "Terminal").on_click(move |_, _, _| api::open_terminal(&path)))
+                .child(div().flex_1())
+                .child(div().pr(px(10.)).text_size(px(13.5)).text_color(pp.text3).child(if mem > 0 { mb(mem) } else { "PHP pool only".into() }))).into_any_element());
+    }
+    if sites.is_empty() { grid.push(muted(p, "No sites yet. Add one from the list on the left.").into_any_element()); }
+    div().flex().flex_col().gap(px(14.)).child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Sites")).child(muted(p, format!("{} in your Sites folders", sites.len())))).child(grid_of(grid, 2)).into_any_element()
 }

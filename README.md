@@ -33,8 +33,16 @@ Measured on this machine (warm, HTTPS, with Defender still scanning): Acme's log
 
 ## Install
 
+Download the build for your system from the
+[Releases page](https://github.com/boparaiamrit/tez/releases): a zip for Windows, a `.dmg` for
+macOS on Apple silicon, a `.tar.gz` for Linux. Each release is built, smoke-tested and packaged by
+GitHub Actions on its own operating system. The macOS app is not notarised yet; the first time,
+right-click it and choose Open.
+
+Or build it yourself:
+
 ```powershell
-cargo build --release --workspace     # builds tez.exe and tez-app.exe (needs VS 2022 C++ tools)
+cargo build --release --workspace     # tez and tez-app (Windows needs the VS 2022 C++ tools)
 .\target\release\tez.exe install --all
 ```
 
@@ -87,23 +95,28 @@ SSH alias from `~/.ssh/config` (for example `github.com-work`) or through gh ove
 
 ## The desktop app
 
-`tez-app.exe` is a native window built with [GPUI Kit](https://gpui-kit.com), plus a tray icon.
-Left-click the tray icon to open the window; the right-click menu lists your sites and has Start,
-Restart, Stop and Quit. Closing the window leaves tez in the tray.
+`tez-app` is a native window built with [GPUI Kit](https://gpui-kit.com), plus a tray icon (the
+menu bar on macOS, an AppIndicator on Linux). It draws its own title bar on Windows and macOS: File,
+Edit, View and Help menus, back and forward, and the window buttons. Closing the window leaves tez
+in the tray.
 
-Each page puts the settings people change most at the top, and the rest in named groups below it:
+The window has an icon rail (Home, Sites, Services, PHP, Debug), a list for the current section and
+an inset panel. Each page answers one question first:
 
-- **Overview:** status, sites (start/stop their processes), services, recent jobs
-- **One page per site:** PHP version, processes, extra domains, every `.env` key grouped
-  (Application, Database, Queues & Horizon, Broadcasting & Reverb, Mail, Search, Storage...), and
-  config files
-- **New site from GitHub**
-- **One page per service:** running, port, tuning (PostgreSQL memory, Redis limits...), PostgreSQL
-  extensions, other versions, the `.env` lines to copy
-- **One page per PHP version:** essentials (memory, time limit, upload size), limits, errors,
-  OPcache, Xdebug, every extension as a switch, and any PECL extension to install
-- **Settings:** default PHP, domain, sites folders, start with Windows, Xdebug, Dumps, ports,
-  HTTPS trust, hosts, Defender
+- **Home: is my machine OK, and are my sites fast?** Problems that need you, each with its fix;
+  memory over 15 minutes, an hour or a day, split into PHP pools, site processes, services and the
+  web server; the whole machine (tez, WSL, other apps, free) and the disk; a card per site with
+  requests per minute, p95 response time and server errors; a card per service.
+- **A site: is it fast and healthy?** p50 and p95 response times, the slowest routes, the latest
+  server errors and ERROR entries in laravel.log, all read from the web server's own log with no code
+  in your app; queue throughput and the slowest jobs, read from Horizon's output; Horizon, Reverb,
+  Vite and the scheduler as cards with their memory, CPU and restarts; a box to run artisan,
+  composer or npm in the site. Tabs for the environment (secrets masked), domains, config files and
+  logs.
+- **Services, PHP, Dumps, Mail, Logs** as before, and **Settings** in a sheet.
+
+Things you control are cards: the switch top-right turns the whole thing on or off, status sits
+under the name, what it costs is in the strip below, and actions are in the footer.
 
 Typed changes save themselves shortly after you stop typing. Secrets (APP_KEY, passwords, API keys,
 the Meilisearch master key) are masked, have a show toggle and their own Save button, and say

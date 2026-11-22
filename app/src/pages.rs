@@ -156,7 +156,7 @@ pub(crate) fn jump_overlay(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEle
     let pp = *p;
     div().absolute().top_0().left_0().size_full().bg(rgba(0x00000080)).flex().flex_col().items_center().pt(px(110.))
         .occlude()
-        .child(div().w(px(540.)).bg(p.surface).border_1().border_color(p.line2).rounded(px(14.)).shadow_lg().flex().flex_col()
+        .child(div().id("jump-card").occlude().w(px(540.)).bg(p.surface).border_1().border_color(p.line2).rounded(px(14.)).shadow_lg().flex().flex_col()
             .on_mouse_down_out(|_, _, cx| { cx.global_mut::<Tez>().jump = false; cx.refresh_windows(); })
             .child(div().p(px(12.)).border_b_1().border_color(p.line).child(input_el(&input, false)))
             .child(div().p(px(6.)).flex().flex_col().children(items.into_iter().enumerate().map(move |(i, (label, ic, page))| {
@@ -658,7 +658,7 @@ pub(crate) fn services_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEl
         .unwrap_or_else(|| card(p).p(px(18.)).child(muted(p, "No services yet.")).into_any_element());
     div().flex().flex_col().gap(px(20.))
         .child(header(p, "Services", "Databases, caches and tools shared by every site. Several versions can run side by side.", vec![]))
-        .child(div().flex().flex_row().items_start().gap(px(16.)).child(nav).child(div().flex_1().min_w(px(0.)).child(detail)))
+        .child(detail)
         .into_any_element()
 }
 
@@ -933,7 +933,7 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
 
     div().flex().flex_col().gap(px(20.))
         .child(header(p, "PHP", "Every version side by side. Each site uses the version its composer.json asks for.", vec![]))
-        .child(div().flex().flex_row().flex_wrap().gap(px(8.)).children(grid))
+        .when(grid.len() > versions.len(), |d| d.child(div().flex().flex_col().gap(px(10.)).child(muted(p, "Not installed yet")).child(div().flex().flex_row().flex_wrap().gap(px(8.)).children(grid.into_iter().skip(versions.len())))))
         .child(head)
         .child(div().flex().flex_row().flex_wrap().items_start().gap(px(16.))
             .child(card(p).flex_grow(1.).flex_basis(px(360.)).min_w(px(340.)).child(card_head(p, "Essentials").child(muted(p, "Changed most often"))).child(rows(p, ess)))
