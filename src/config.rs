@@ -39,6 +39,38 @@ pub struct Config {
     /// Extensions turned on (beyond the defaults) or off, per version.
     pub php_ext_on: BTreeMap<String, Vec<String>>,
     pub php_ext_off: BTreeMap<String, Vec<String>>,
+    /// How `tez share` puts a site on the internet.
+    pub tunnel: TunnelConfig,
+}
+
+/// `tez share` settings: the default way to share, and your own servers for SSH and frp.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct TunnelConfig {
+    /// "cloudflare" (no account), "ssh" or "frp".
+    pub provider: String,
+    /// SSH: localhost.run (no account) or your own sish server.
+    pub ssh_host: String,
+    pub ssh_port: u16,
+    pub ssh_user: String,
+    /// SSH: the name to ask a sish server for (empty: a random one).
+    pub ssh_subdomain: String,
+    /// frp: your frps server, its token, and the domain it serves sites under (site.domain).
+    pub frp_server: String,
+    pub frp_port: u16,
+    pub frp_token: String,
+    pub frp_domain: String,
+    /// frp: the server serves https (it has a certificate), so links are built with https.
+    pub frp_https: bool,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        TunnelConfig {
+            provider: "cloudflare".into(), ssh_host: "localhost.run".into(), ssh_port: 22, ssh_user: "nokey".into(), ssh_subdomain: String::new(),
+            frp_server: String::new(), frp_port: 7000, frp_token: String::new(), frp_domain: String::new(), frp_https: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -90,6 +122,7 @@ impl Default for Config {
             php_ini_for: BTreeMap::new(),
             php_ext_on: BTreeMap::new(),
             php_ext_off: BTreeMap::new(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }

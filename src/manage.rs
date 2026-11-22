@@ -32,7 +32,71 @@ pub fn settings_get() -> Value {
         "web_server": web::server(&cfg), "web_server_wanted": cfg.web_server,
         "web_servers": web_servers(),
         "os": sys::os(), "arch": sys::arch(),
+        "tunnel": tunnel_json(&cfg),
     })
+}
+
+/// `tez share` settings for the dashboard; the frp token is only reported as set or not.
+fn tunnel_json(cfg: &Config) -> Value {
+    let t = &cfg.tunnel;
+    json!({
+        "provider": t.provider, "providers": crate::tunnel::PROVIDERS.iter().map(|(n, about)| json!({ "name": n, "about": about })).collect::<Vec<_>>(),
+        "ssh_host": t.ssh_host, "ssh_port": t.ssh_port, "ssh_user": t.ssh_user, "ssh_subdomain": t.ssh_subdomain,
+        "frp_server": t.frp_server, "frp_port": t.frp_port, "frp_token_set": !t.frp_token.is_empty(), "frp_domain": t.frp_domain, "frp_https": t.frp_https,
+        "cloudflared": crate::tunnel::cloudflared_exe().exists(), "frpc": crate::tunnel::frpc_exe().exists(),
+    })
+}
+
+/// Apply `tunnel` settings from the dashboard or `tez share setup`.
+pub fn tunnel_set(cfg: &mut Config, v: &Value) -> R<()> {
+    let t = &mut cfg.tunnel;
+    let text = |k: &str| v[k].as_str().map(|s| s.trim().to_string());
+    if let Some(p) = text("provider") {
+        if !crate::tunnel::PROVIDERS.iter().any(|(n, _)| *n == p) { bail!("'{p}' is not a way to share; use cloudflare, ssh or frp"); }
+        t.provider = p;
+    }
+    for (k, slot) in [("ssh_host", &mut t.ssh_host), ("ssh_user", &mut t.ssh_user), ("ssh_subdomain", &mut t.ssh_subdomain), ("frp_server", &mut t.frp_server), ("frp_domain", &mut t.frp_domain)] {
+        if let Some(s) = text(k) {
+            if s.contains(|c: char| c.is_whitespace() || "\"'`;$|&<>".contains(c)) { bail!("'{s}' has characters that cannot be in a host or name"); }
+            *slot = s;
+        }
+    }
+    if let Some(n) = v["ssh_port"].as_u64() { t.ssh_port = n.clamp(1, 65535) as u16; }
+    if let Some(n) = v["frp_port"].as_u64() { t.frp_port = n.clamp(1, 65535) as u16; }
+    if let Some(s) = v["frp_token"].as_str() { t.frp_token = s.to_string(); }
+    if let Some(b) = v["frp_https"].as_bool() { t.frp_https = b; }
+    Ok(())
+}
+
+/// Every share with its state and public address, for the status.
+pub fn shares_json(cfg: &Config, procs: &[Value]) -> Vec<Value> {
+    crate::tunnel::active().iter().map(|s| {
+        let name = crate::tunnel::proc_name(&s.site);
+        let p = procs.iter().find(|x| x["name"] == name.as_str());
+        let site = sites::find(cfg, &s.site);
+        let hot = site.as_ref().map(|x| x.path.join("public").join("hot").exists()).unwrap_or(false);
+        json!({
+            "site": s.site, "provider": s.provider, "port": s.port, "emails": s.emails, "started": s.started,
+            "url": crate::tunnel::public_url(cfg, s), "state": p.map(|x| x["state"].clone()).unwrap_or(json!("starting")),
+            "last_exit": p.map(|x| x["last_exit"].clone()).unwrap_or(Value::Null), "vite_hot": hot,
+        })
+    }).collect()
+}
+
+/// Share a site on the internet (or change how it is shared).
+pub fn share_start(shared: &Shared, name: &str, body: &Value) -> R<Value> {
+    let cfg = Config::load();
+    let emails: Vec<String> = body["emails"].as_array().map(|a| a.iter().filter_map(|e| e.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
+    let share = crate::tunnel::start(&cfg, name, body["provider"].as_str(), emails)?;
+    // A changed provider changes the tunnel's command, which the reload restarts.
+    let notes = daemon::reload(shared)?;
+    Ok(json!({ "ok": true, "share": share, "notes": notes }))
+}
+
+pub fn share_stop(shared: &Shared, name: &str) -> R<Value> {
+    let was = crate::tunnel::stop(name)?;
+    daemon::reload(shared)?;
+    Ok(json!({ "ok": true, "was_shared": was }))
 }
 
 /// Each web server tez can run here: whether it can, and why not.
@@ -74,6 +138,7 @@ pub fn settings_set(shared: &Shared, body: &Value) -> R<Value> {
         if v { std::fs::write(flag, b"1")?; } else { let _ = std::fs::remove_file(flag); }
     }
     if let Some(v) = body["autostart"].as_bool() { set_autostart(v)?; }
+    if body["tunnel"].is_object() { tunnel_set(&mut cfg, &body["tunnel"])?; }
     let restart_php = body.get("xdebug").is_some() || body.get("php_workers").is_some();
     let restart_web = body.get("http_port").is_some() || body.get("https_port").is_some();
     cfg.save()?;

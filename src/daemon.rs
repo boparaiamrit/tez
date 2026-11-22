@@ -307,6 +307,8 @@ pub fn plan(cfg: &Config) -> R<(Vec<Spec>, Vec<String>)> {
         if !site.settings.up { continue; }
         match project::specs(cfg, &site) { Ok(v) => specs.extend(v), Err(e) => notes.push(format!("{}: {e}", site.name)) }
     }
+    // Sites shared on the internet: one tunnel process each.
+    specs.extend(crate::tunnel::specs(cfg));
     Ok((specs, notes))
 }
 
@@ -346,6 +348,8 @@ pub fn run() -> R<()> {
     let pidfile = paths::run_dir().join("daemon.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;
     web::reset_ports();
+    // Shares never outlive the daemon: a site is not left public after a restart.
+    crate::tunnel::clear_all();
     crate::php::write_all_inis(&cfg)?;
     let (specs, notes) = plan(&cfg)?;
     let shared: Shared = Arc::new(Mutex::new(Daemon { procs: Vec::new(), started: SystemTime::now(), notes }));

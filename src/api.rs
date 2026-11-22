@@ -130,10 +130,11 @@ pub fn status_json(shared: &Shared) -> serde_json::Value {
     }).collect();
     let php_list: Vec<_> = php::installed().into_iter().map(|(m, v)| json!({ "minor": m, "version": v, "default": m == cfg.default_php })).collect();
     let svc_list = crate::manage::service_instances(&cfg);
+    let shares = crate::manage::shares_json(&cfg, &procs);
     json!({
         "tld": cfg.tld, "http_port": http, "https_port": https, "web_server": web::server(&cfg), "procs": procs, "sites": site_list,
         "php": php_list, "services": svc_list, "notes": notes, "memory": total_mem, "home": paths::home(),
-        "xdebug": cfg.xdebug, "version": env!("CARGO_PKG_VERSION"),
+        "xdebug": cfg.xdebug, "version": env!("CARGO_PKG_VERSION"), "shares": shares,
     })
 }
 
@@ -164,6 +165,8 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
             drop(d);
             if found { json_ok(&mut stream, json!({ "ok": true })) } else { json_err(&mut stream, 404, "no such process") }
         }
+        ("POST", ["api", "site", name, "share"]) => reply(&mut stream, body_json(&req).and_then(|b| crate::manage::share_start(&shared, name, &b))),
+        ("POST", ["api", "site", name, "unshare"]) => reply(&mut stream, crate::manage::share_stop(&shared, name)),
         ("POST", ["api", "site", name, action @ ("up" | "down")]) => {
             let mut cfg = Config::load();
             if sites::find(&cfg, name).is_none() { json_err(&mut stream, 404, "no such site"); return false; }

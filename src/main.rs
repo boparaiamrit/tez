@@ -24,6 +24,7 @@ mod spec;
 mod stats;
 mod sys;
 mod tls;
+mod tunnel;
 mod util;
 mod web;
 

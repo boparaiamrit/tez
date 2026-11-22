@@ -4,7 +4,7 @@
 
 use crate::pages;
 use crate::ui::*;
-use crate::{api, busy_on, do_remove, flip_proc, flip_service, flip_site, go, go_back, go_forward, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Busy, Page, Tez};
+use crate::{api, busy_on, do_remove, flip_proc, flip_service, flip_share, flip_site, go, share_of, go_back, go_forward, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Busy, Page, Tez};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use gpui_kit::prelude::FluentBuilder;
@@ -52,6 +52,7 @@ fn ctx_items(kind: &str, cx: &App) -> Vec<MenuItem> {
                 mi("Open in editor", move |_, _| api::open_editor(&p3)),
                 mi("Copy address", move |_, cx| { cx.write_to_clipboard(ClipboardItem::new_string(u2.clone())); notify(cx, "Address copied".to_string()); }),
                 MenuItem { sep_before: true, ..mi(if up { "Stop its processes" } else { "Start its processes" }, move |_, cx| flip_site(cx, &n1, !up)) },
+                { let (n5, shared) = (name.clone(), share_of(cx, &name).is_some()); mi(if shared { "Stop sharing" } else { "Share on the internet" }, move |_, cx| flip_share(cx, &n5, !shared, None, Vec::new())) },
                 MenuItem { sep_before: true, ..mi("Remove site…", move |_, cx| open_remove(cx, n2.clone())) },
             ]
         }
@@ -440,6 +441,8 @@ fn side_list(p: &Pal, cx: &App) -> Div {
     let page = t.page.clone();
     let procs = arr(&t.status["procs"]);
     let sm = t.site_metrics["sites"].clone();
+    // Shared sites show a tower instead of the folder.
+    let shared_sites: Vec<String> = arr(&t.status["shares"]).iter().map(|x| txt(&x["site"])).collect();
     let title = match sec { Section::Sites => "Sites", Section::Services => "Services", Section::Php => "PHP", Section::Debug => "Debug" };
     let mut list = div().id("side-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().flex().flex_col().gap(px(1.));
     match sec {
@@ -459,7 +462,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 for s in &running {
                     let name = txt(&s["name"]);
                     let ctx_kind = format!("site:{name}");
-                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
+                    list = list.child(side_item(format!("si-{name}"), p, Some(if shared_sites.contains(&name) { "radio-tower" } else { "folder" }), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
                         .on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }));
                     for x in procs.iter().filter(|x| txt(&x["group"]) == format!("site:{name}")) {
                         let short = txt(&x["name"]).rsplit('/').next().unwrap_or_default().to_string();
@@ -473,7 +476,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 for s in &rest {
                     let name = txt(&s["name"]);
                     let ctx_kind = format!("site:{name}");
-                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
+                    list = list.child(side_item(format!("si-{name}"), p, Some(if shared_sites.contains(&name) { "radio-tower" } else { "folder" }), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
                         .on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }));
                 }
             }
@@ -960,7 +963,8 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
     let t = tez(cx);
     let job_log = if t.job_open.is_some() { t.job_log.clone() } else { String::new() };
     let mm = t.site_metrics["sites"][name].clone();
-    let mut out = div().flex().flex_col().gap(px(22.)).child(runner)
+    let share_el = share_card(p, name, window, cx);
+    let mut out = div().flex().flex_col().gap(px(22.)).child(share_el).child(runner)
         .when(!job_log.is_empty(), |d| d.child(code_block(&pp, &job_log, 14)));
 
     // Performance
@@ -1070,7 +1074,7 @@ fn settings_sheet(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     let pp = *p;
     let groups: Vec<(&str, Vec<(&str, &str, &str)>)> = vec![
         ("tez", vec![("general", "General", "settings"), ("appearance", "Appearance", "sun"), ("startup", "Startup", "power")]),
-        ("This computer", vec![("https", "HTTPS and hosts", "shield-check"), ("ports", "Web server and ports", "globe"), ("performance", "Performance", "gauge")]),
+        ("This computer", vec![("https", "HTTPS and hosts", "shield-check"), ("ports", "Web server and ports", "globe"), ("sharing", "Sharing", "radio-tower"), ("performance", "Performance", "gauge")]),
         ("Accounts", vec![("github", "GitHub", "github")]),
         ("About", vec![("updates", "Updates", "download")]),
     ];
@@ -1149,6 +1153,7 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
                 .child(field(p, "HTTPS port", Some("The port for https:// addresses".into()), false, div().w(px(120.)).child(input_el(&si, true))))
                 .child(field(p, "HTTP port", Some({ let mut c = note.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }), false, div().w(px(120.)).child(input_el(&hi, true)))).into_any_element())
         }
+        "sharing" => sharing_settings(p, &s, window, cx),
         "performance" => {
             let workers = crate::draft(cx, "set:workers", s["php_workers"].as_u64().map(|x| x.to_string()).unwrap_or_default());
             let wi = text_input(window, cx, "set:workers", &workers, "6", false, Some(Rc::new(|v, cx| if let Ok(n) = v.trim().parse::<u64>() { crate::queue(cx, "set:workers".into(), v.clone(), "/api/settings".into(), json!({ "php_workers": n })) })));
@@ -1331,6 +1336,7 @@ fn site_cards(p: &Pal, cx: &App, titled: bool) -> AnyElement {
         let has_req = arr(&mm["series"]).iter().any(|x| x["req"].as_f64().unwrap_or(0.) > 0.);
         let errs: f64 = arr(&mm["series"]).iter().filter_map(|x| x["e5xx"].as_f64()).sum();
         let status = if running { format!("Running · PHP {}", txt(&s["php"])) } else if declared { format!("Served · processes off · PHP {}", txt(&s["php"])) } else { format!("Served · PHP {}", txt(&s["php"])) };
+        let status = if share_of(cx, &name).is_some() { format!("{status} · public") } else { status };
         let (url, path) = (txt(&s["url"]), txt(&s["path"]));
         let horizon = live.iter().find(|x| txt(&x["name"]).ends_with("/horizon")).map(|x| txt(&x["url"])).filter(|u| !u.is_empty());
         let n2 = name.clone();
@@ -1354,4 +1360,146 @@ fn site_cards(p: &Pal, cx: &App, titled: bool) -> AnyElement {
     }
     if sites.is_empty() { grid.push(muted(p, "No sites yet. Add one from the list on the left.").into_any_element()); }
     div().flex().flex_col().gap(px(14.)).when(titled, |d| d.child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Sites")).child(muted(p, format!("{} in your Sites folders", sites.len()))))).child(grid_of(grid, 2)).into_any_element()
+}
+
+// ------------------------------------------------------------------ sharing on the internet
+
+fn provider_label(p: &str) -> &'static str {
+    match p { "cloudflare" => "Cloudflare", "ssh" => "SSH", "frp" => "your frp server", _ => "a tunnel" }
+}
+
+/// The top of a site's Overview: share it on the internet, or its public address while shared.
+fn share_card(p: &Pal, name: &str, window: &mut Window, cx: &mut App) -> AnyElement {
+    let pp = *p;
+    let share = share_of(cx, name);
+    let change = busy_on(cx, &format!("share:{name}"));
+    let tun = tez(cx).settings["tunnel"].clone();
+    let default = { let d = txt(&tun["provider"]); if d.is_empty() { "cloudflare".to_string() } else { d } };
+    let pick_key = format!("share-via:{name}");
+    let via = { let v = local(cx, &pick_key); if v.is_empty() { default.clone() } else { v } };
+    let frp_ready = !txt(&tun["frp_server"]).is_empty() && !txt(&tun["frp_domain"]).is_empty();
+    let head = |ic: &str, tone: Tone, title: String, sub_text: String| {
+        let (fg, bg) = pp.tone(tone);
+        div().flex().flex_row().items_center().gap(px(14.)).flex_1().min_w(px(260.))
+            .child(div().size(px(40.)).flex_none().rounded(px(10.)).bg(bg).flex().items_center().justify_center().child(icon(ic, 19., fg)))
+            .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.)).child(strong(&pp, title)).child(muted(&pp, sub_text)))
+    };
+    match share {
+        Some(sh) => {
+            let url = txt(&sh["url"]);
+            let provider = txt(&sh["provider"]);
+            let emails: Vec<String> = arr(&sh["emails"]).iter().map(txt).collect();
+            let stopping = change == Some(false);
+            let waiting = url.is_empty();
+            let failed = sh["state"] == "failed";
+            let title = if stopping { "Closing the public address…".to_string() } else if failed { "The tunnel stopped".to_string() } else if waiting { format!("Opening a public address through {}…", provider_label(&provider)) } else { "Live on the internet".to_string() };
+            let who = if !emails.is_empty() { format!("Only {} can open it, after a one-time PIN by email.", emails.join(", ")) }
+                else if provider == "ssh" { "Anyone with the address can open it. localhost.run changes the address now and then.".to_string() }
+                else { "Anyone with the address can open it. It closes when you stop it or tez restarts.".to_string() };
+            let (n1, n2, u1, u2) = (name.to_string(), name.to_string(), url.clone(), url.clone());
+            let mut card = cardbox(p).p(px(18.)).gap(px(14.))
+                .child(div().flex().flex_row().flex_wrap().items_center().gap(px(12.))
+                    .child(head("radio-tower", if failed { Tone::Err } else if waiting || stopping { Tone::Warn } else { Tone::Ok }, title, if failed { txt(&sh["last_exit"]) } else { who }))
+                    .child(div().flex().flex_row().gap(px(8.))
+                        .when(!url.is_empty(), |d| d
+                            .child(button("sh-copy", p, Kind::Secondary, false, Some("copy"), Some("Copy")).on_click(move |_, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(u1.clone())); notify(cx, "Public address copied"); }))
+                            .child(button("sh-open", p, Kind::Secondary, false, Some("external-link"), Some("Open")).on_click(move |_, _, _| api::open_url(&u2))))
+                        .child(button("sh-stop", p, Kind::Secondary, false, Some("circle-stop"), Some(if stopping { "Stopping…" } else { "Stop sharing" })).on_click(move |_, _, cx| flip_share(cx, &n1, false, None, Vec::new())))));
+            if !url.is_empty() {
+                card = card.child(div().flex().flex_row().items_center().gap(px(10.)).px(px(14.)).h(px(40.)).rounded(px(8.)).bg(pp.code).border_1().border_color(pp.line)
+                    .child(icon("lock", 14., pp.green)).child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_size(px(13.5)).child(url.clone())));
+            } else if !stopping && !failed {
+                card = card.child(div().flex().flex_row().items_center().gap(px(10.)).child(spinner(sid(format!("shs-{n2}")), 14., pp.text3)).child(muted(p, "The first time, tez downloads the tunnel program. This takes a few seconds.")));
+            }
+            if sh["vite_hot"] == true {
+                card = card.child(banner(p, Tone::Warn, "triangle-alert", "Visitors get no CSS or JavaScript while Vite's dev server runs",
+                    "Vite serves them from this computer only. Build them with npm run build and turn Vite off for this site while it is shared."));
+            }
+            card.into_any_element()
+        }
+        None => {
+            let starting = change == Some(true);
+            let mut opts: Vec<(String, String)> = vec![("cloudflare".into(), "Cloudflare".into()), ("ssh".into(), "SSH".into())];
+            opts.push(("frp".into(), "My server (frp)".into()));
+            let off: Vec<String> = if frp_ready { Vec::new() } else { vec!["frp".into()] };
+            let pk = pick_key.clone();
+            let picker = seg_with(&format!("sh-via-{name}"), p, &opts, &via, &off, Rc::new(move |v, cx| set_local(cx, &pk, v)));
+            let mail_key = format!("share-mail:{name}");
+            let mails = local(cx, &mail_key);
+            let mk = mail_key.clone();
+            let mail_in = text_input(window, cx, &mail_key, &mails, "Only these emails, e.g. you@x.com, *@team.com (optional)", false, Some(Rc::new(move |v, cx| set_local(cx, &mk, v))));
+            let (n1, via2, mk2) = (name.to_string(), via.clone(), mail_key.clone());
+            let about = match via.as_str() {
+                "ssh" => "Through localhost.run over SSH, with no account and nothing to install.",
+                "frp" => "Through your own frp server, on your own domain.",
+                _ => "Through a Cloudflare quick tunnel: no account, a random https address.",
+            };
+            cardbox(p).p(px(18.)).gap(px(14.))
+                .child(div().flex().flex_row().flex_wrap().items_center().gap(px(12.))
+                    .child(head("earth", Tone::Neutral, "Share on the internet".to_string(), format!("A public https address for clients, a phone or webhooks. {about}")))
+                    .child(div().flex().flex_row().items_center().gap(px(10.))
+                        .child(picker)
+                        .child(button("sh-start", p, Kind::Primary, false, if starting { None } else { Some("radio-tower") }, Some(if starting { "Opening…" } else { "Share" }))
+                            .on_click(move |_, _, cx| {
+                                let emails: Vec<String> = if via2 == "cloudflare" { crate::local(cx, &mk2).split(',').map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect() } else { Vec::new() };
+                                flip_share(cx, &n1, true, Some(via2.clone()), emails);
+                            }))))
+                .when(via == "cloudflare", |d| d.child(div().w_full().child(input_el(&mail_in, true))))
+                .into_any_element()
+        }
+    }
+}
+
+/// Settings > Sharing: the default way to share, and your own SSH or frp server.
+fn sharing_settings(p: &Pal, s: &Value, window: &mut Window, cx: &mut App) -> (String, String, AnyElement) {
+    let t = s["tunnel"].clone();
+    let now = { let v = txt(&t["provider"]); if v.is_empty() { "cloudflare".to_string() } else { v } };
+    let opts = vec![("cloudflare".to_string(), "Cloudflare".to_string()), ("ssh".to_string(), "SSH".to_string()), ("frp".to_string(), "My server (frp)".to_string())];
+    let way = seg("set-share", p, &opts, &now, Rc::new(|v, cx| {
+        let t = cx.global_mut::<Tez>();
+        if t.settings["tunnel"].is_object() { t.settings["tunnel"]["provider"] = json!(v.clone()); }
+        cx.refresh_windows();
+        send(cx, "/api/settings".into(), json!({ "tunnel": { "provider": v } }), "Saved");
+    }));
+    let text = |window: &mut Window, cx: &mut App, key: &'static str, ph: &str, masked: bool| {
+        let saved = if masked { String::new() } else { t[key].as_u64().map(|n| n.to_string()).unwrap_or_else(|| txt(&t[key])) };
+        let dk = format!("tun:{key}");
+        let now = crate::draft(cx, &dk, saved);
+        let dk2 = dk.clone();
+        let input = text_input(window, cx, &dk, &now, ph, masked, Some(Rc::new(move |v, cx| {
+            let val = if key.ends_with("_port") { match v.trim().parse::<u64>() { Ok(n) => json!(n), Err(_) => return } } else { json!(v.trim()) };
+            crate::queue(cx, dk2.clone(), v.clone(), "/api/settings".into(), json!({ "tunnel": { key: val } }));
+        })));
+        div().w(px(300.)).child(input_el(&input, true))
+    };
+    let ssh_host = text(window, cx, "ssh_host", "localhost.run", false);
+    let ssh_user = text(window, cx, "ssh_user", "nokey", false);
+    let ssh_port = text(window, cx, "ssh_port", "22", false);
+    let ssh_sub = text(window, cx, "ssh_subdomain", "random", false);
+    let frp_server = text(window, cx, "frp_server", "frp.example.com", false);
+    let frp_port = text(window, cx, "frp_port", "7000", false);
+    let frp_token = text(window, cx, "frp_token", if t["frp_token_set"] == true { "Set; type to replace" } else { "The server's auth token" }, true);
+    let frp_domain = text(window, cx, "frp_domain", "dev.example.com", false);
+    let https_on = t["frp_https"].as_bool().unwrap_or(true);
+    let https_sw = switch("set-frp-https", p, https_on).on_click(move |_, _, cx| {
+        let t = cx.global_mut::<Tez>();
+        if t.settings["tunnel"].is_object() { t.settings["tunnel"]["frp_https"] = json!(!https_on); }
+        cx.refresh_windows();
+        send(cx, "/api/settings".into(), json!({ "tunnel": { "frp_https": !https_on } }), "Saved");
+    });
+    ("Sharing".into(), "Putting a site on the internet with tez share, through open-source tunnels".into(), div().flex().flex_col().gap(px(22.))
+        .child(div().flex().flex_col().child(group_title(p, "Default", None))
+            .child(field(p, "Share through", Some("Cloudflare needs no account. SSH uses the client Windows already has. frp needs your own server.".into()), false, way)))
+        .child(div().flex().flex_col().child(group_title(p, "SSH", Some("localhost.run with no account, or your own sish server".into())))
+            .child(field(p, "Server", None, false, ssh_host))
+            .child(field(p, "User", Some("nokey for localhost.run".into()), false, ssh_user))
+            .child(field(p, "Port", None, false, ssh_port))
+            .child(field(p, "Name to ask for", Some("On your own sish server: the site's address becomes name.server".into()), false, ssh_sub)))
+        .child(div().flex().flex_col().child(group_title(p, "frp", Some("Your frps server; each site gets site.domain".into())))
+            .child(field(p, "Server", None, false, frp_server))
+            .child(field(p, "Port", Some("frps bindPort".into()), false, frp_port))
+            .child(field(p, "Token", Some("Kept in tez's settings on this computer".into()), false, frp_token))
+            .child(field(p, "Domain", Some("Its DNS points *.domain at the server".into()), false, frp_domain))
+            .child(field(p, "The server has HTTPS", Some("Off if it serves plain http".into()), false, https_sw)))
+        .into_any_element())
 }

@@ -206,6 +206,20 @@ pub fn caddyfile(cfg: &Config) -> String {
         }
         s.push_str("}\n\n");
     }
+    // Shared sites: the same site on its own loopback port for the tunnel, any host name, with PHP
+    // told the request is HTTPS so Laravel builds links with the public address.
+    let all = sites::all(cfg);
+    for share in crate::tunnel::active() {
+        let Some(site) = all.iter().find(|x| x.name == share.site) else { continue };
+        if !php::is_installed(&site.php) { continue; }
+        s.push_str(&format!("# {} shared ({})\nhttp://:{} {{\n\tbind 127.0.0.1\n", site.name, share.provider, share.port));
+        s.push_str(&format!("\troot * \"{}\"\n\tencode zstd gzip\n", paths::fwd(&site.root)));
+        let ups = cgi_upstreams(&site.php, cfg);
+        s.push_str(&format!("\tphp_fastcgi {} {{\n", ups.join(" ")));
+        s.push_str("\t\tlb_policy least_conn\n\t\tlb_try_duration 30s\n\t\tlb_try_interval 50ms\n\t\tdial_timeout 2s\n\t\tread_timeout 300s\n");
+        if crate::tunnel::https(cfg, &share) { s.push_str("\t\tenv HTTPS on\n\t\tenv SERVER_PORT 443\n\t\tenv REQUEST_SCHEME https\n"); }
+        s.push_str("\t}\n\tfile_server\n}\n\n");
+    }
     s
 }
 

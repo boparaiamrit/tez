@@ -71,6 +71,11 @@ fn dispatch(args: &[String]) -> R<()> {
         ["site", "rm", name, flags @ ..] | ["site", "remove", name, flags @ ..] => site_rm(name, flags),
         ["site", "hidden"] => site_hidden(),
         ["site", "unhide", which] => site_unhide(which),
+        ["share", "list"] | ["shares"] => shares_list(),
+        ["share", "stop"] | ["unshare"] => unshare(None),
+        ["share", "stop", name] | ["unshare", name] => unshare(Some(name)),
+        ["share", "setup", rest @ ..] => share_setup(rest),
+        ["share", rest @ ..] => share(rest),
         ["domain", "add", host] => domain(true, host, None),
         ["domain", "add", host, site] => domain(true, host, Some(site)),
         ["domain", "remove", host] => domain(false, host, None),
@@ -139,6 +144,10 @@ Sites (folders in ~/Sites are served at https://<folder>.test)
                                         stop serving a site; --files moves its folder to the
                                         Recycle Bin/Trash, --database drops its local database
   tez site hidden | unhide <name|path>  sites removed from tez whose folders remain
+  tez share [site] [--via cloudflare|ssh|frp] [--allow you@x.com,@team.com]
+                                        put a site on the internet through a tunnel (Cloudflare
+                                        quick tunnel by default: no account); stop: tez share stop
+  tez share list | share setup ssh <host> | share setup frp <server> --domain <d> [--token t]
   tez domain add admin.app.test [site]  extra domains for multi-domain apps (remove to undo)
   tez trust                             trust HTTPS and add hosts entries (asks for admin once)
   tez web [use caddy|nginx]             the web server in front of every site (Caddy by default)
@@ -1394,5 +1403,94 @@ fn versions_pecl(ext: &str, rest: &[&str]) -> R<()> {
         println!("  {:<12} {:<8} {how}", o["version"].as_str().unwrap_or_default(), o["stability"].as_str().unwrap_or_default());
     }
     if let Some(n) = v["note"].as_str() { println!("{}", dim(n)); }
+    Ok(())
+}
+// ------------------------------------------------------------------ sharing (tunnels)
+
+/// `tez share [site] [--via p] [--allow emails]`: start a tunnel and wait for its address.
+fn share(args: &[&str]) -> R<()> {
+    let cfg = Config::load();
+    let mut site: Option<String> = None;
+    let mut via: Option<String> = None;
+    let mut emails: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--via" => { via = args.get(i + 1).map(|s| s.to_string()); i += 2; }
+            "--allow" => { emails.extend(args.get(i + 1).map(|s| s.split(',').map(|e| e.trim().to_string()).collect::<Vec<_>>()).unwrap_or_default()); i += 2; }
+            other if !other.starts_with("--") => { site = Some(other.to_string()); i += 1; }
+            other => bail!("unknown option {other}"),
+        }
+    }
+    let name = match site { Some(s) => s, None => current_site(&cfg)?.name };
+    let provider = via.clone().unwrap_or_else(|| cfg.tunnel.provider.clone());
+    util::step(&format!("Sharing {name} through {provider}{}", if provider == "cloudflare" && !crate::tunnel::cloudflared_exe().exists() { " (downloading cloudflared the first time)" } else { "" }));
+    let body = serde_json::json!({ "provider": via, "emails": emails });
+    api::call_json("POST", &format!("/api/site/{name}/share"), &body)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let status: serde_json::Value = serde_json::from_str(&api::call("GET", "/api/status")?)?;
+        let share = status["shares"].as_array().and_then(|a| a.iter().find(|s| s["site"] == name.as_str()).cloned());
+        let Some(share) = share else { bail!("the share stopped straight away") };
+        if let Some(url) = share["url"].as_str() {
+            util::ok(&format!("{name} is public at {}", bold(url)));
+            if !emails.is_empty() { println!("  only {} can open it (a one-time PIN by email)", emails.join(", ")); } else { println!("  anyone with the address can open it"); }
+            if share["vite_hot"] == true { util::warn("Vite's dev server is running, so visitors get no CSS or JS. Run `npm run build` and stop Vite while sharing."); }
+            println!("  stop with {}", bold(&format!("tez share stop {name}")));
+            return Ok(());
+        }
+        if share["state"] == "failed" || std::time::Instant::now() > deadline {
+            let why = share["last_exit"].as_str().unwrap_or("no address yet");
+            bail!("the tunnel did not come up ({why}); see {}", daemon::log_path(&crate::tunnel::proc_name(&name)).display());
+        }
+        std::thread::sleep(Duration::from_millis(700));
+    }
+}
+
+fn unshare(site: Option<&str>) -> R<()> {
+    let cfg = Config::load();
+    let name = match site { Some(s) => s.to_string(), None => current_site(&cfg)?.name };
+    let out: serde_json::Value = serde_json::from_str(&api::call("POST", &format!("/api/site/{name}/unshare"))?).unwrap_or_default();
+    if out["was_shared"] == true { util::ok(&format!("{name} is no longer public")); } else { println!("{name} was not shared"); }
+    Ok(())
+}
+
+fn shares_list() -> R<()> {
+    let status: serde_json::Value = serde_json::from_str(&api::call("GET", "/api/status")?)?;
+    let list = status["shares"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() { println!("Nothing is shared. Share the current site with {}", bold("tez share")); return Ok(()); }
+    for s in list {
+        println!("  {:<20} {:<11} {}", s["site"].as_str().unwrap_or_default(), s["provider"].as_str().unwrap_or_default(), s["url"].as_str().map(|u| bold(u)).unwrap_or_else(|| dim("starting…")));
+    }
+    Ok(())
+}
+
+/// `tez share setup cloudflare|ssh <host>|frp <server> --domain d`: the default way to share.
+fn share_setup(args: &[&str]) -> R<()> {
+    let mut cfg = Config::load();
+    let flag = |name: &str| args.iter().position(|a| *a == name).and_then(|i| args.get(i + 1)).map(|s| s.to_string());
+    let body = match args.first().copied() {
+        Some("cloudflare") => serde_json::json!({ "provider": "cloudflare" }),
+        Some("ssh") => {
+            let host = args.get(1).filter(|h| !h.starts_with("--")).map(|s| s.to_string()).unwrap_or_else(|| "localhost.run".into());
+            let mut b = serde_json::json!({ "provider": "ssh", "ssh_host": host });
+            if let Some(u) = flag("--user") { b["ssh_user"] = u.into(); }
+            if let Some(p) = flag("--port").and_then(|p| p.parse::<u64>().ok()) { b["ssh_port"] = p.into(); }
+            if let Some(s) = flag("--subdomain") { b["ssh_subdomain"] = s.into(); }
+            b
+        }
+        Some("frp") => {
+            let Some(server) = args.get(1).filter(|h| !h.starts_with("--")) else { bail!("usage: tez share setup frp <server> --domain <domain> [--port 7000] [--token t] [--http]") };
+            let Some(domain) = flag("--domain") else { bail!("--domain is the domain your frp server serves sites on, e.g. dev.example.com") };
+            let mut b = serde_json::json!({ "provider": "frp", "frp_server": server, "frp_domain": domain, "frp_https": !args.contains(&"--http") });
+            if let Some(p) = flag("--port").and_then(|p| p.parse::<u64>().ok()) { b["frp_port"] = p.into(); }
+            if let Some(t) = flag("--token") { b["frp_token"] = t.into(); }
+            b
+        }
+        _ => bail!("usage: tez share setup cloudflare | ssh [host] [--user u] [--port 22] [--subdomain s] | frp <server> --domain <d> [--port 7000] [--token t] [--http]"),
+    };
+    crate::manage::tunnel_set(&mut cfg, &body)?;
+    cfg.save()?;
+    util::ok(&format!("tez share uses {} by default", cfg.tunnel.provider));
     Ok(())
 }

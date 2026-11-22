@@ -49,6 +49,8 @@ pub enum Check {
     Proc(String),
     /// A site's processes: one running when turned on, all stopped when off.
     Site(String),
+    /// A site shared on the internet: its public address known when on, the share gone when off.
+    Share(String),
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +276,7 @@ fn navigate(cx: &mut App, target: &str) {
                     let up = t.status["sites"].as_array().and_then(|a| a.iter().find(|s| txt(&s["name"]) == c)).map(|s| s["up"] == true).unwrap_or(false);
                     flip_site(cx, c, !up);
                 }
+                "share" => { let on = share_of(cx, c).is_none(); flip_share(cx, c, on, None, Vec::new()); }
                 _ => {}
             }
         }
@@ -361,6 +364,18 @@ pub fn flip_proc(cx: &mut App, site: &str, process: &str, on: bool, site_up: boo
     flip(cx, format!("proc:{site}/{process}"), on, doing, done, check, format!("/api/site/{site}"), json!({ "processes": procs }));
 }
 
+/// Share a site on the internet, or stop. `provider` None uses the default from Settings.
+pub fn flip_share(cx: &mut App, site: &str, on: bool, provider: Option<String>, emails: Vec<String>) {
+    let (doing, done) = if on { (format!("Opening a public address for {site}"), format!("{site} is on the internet")) } else { (format!("Closing {site}'s public address"), format!("{site} is no longer public")) };
+    let (path, body) = if on { (format!("/api/site/{site}/share"), json!({ "provider": provider, "emails": emails })) } else { (format!("/api/site/{site}/unshare"), json!({})) };
+    flip(cx, format!("share:{site}"), on, doing, done, Check::Share(site.to_string()), path, body);
+}
+
+/// The share of a site, if it is shared.
+pub fn share_of(cx: &App, site: &str) -> Option<Value> {
+    tez(cx).status["shares"].as_array().and_then(|a| a.iter().find(|s| txt(&s["site"]) == site).cloned())
+}
+
 /// Has the status caught up with a change? None while it is still going, Err when it failed.
 fn settled(status: &Value, b: &Busy) -> Option<Result<(), String>> {
     let procs = status["procs"].as_array().cloned().unwrap_or_default();
@@ -373,6 +388,15 @@ fn settled(status: &Value, b: &Busy) -> Option<Result<(), String>> {
                 (true, Some("running")) => Some(Ok(())),
                 (true, Some("failed")) => Some(Err(p.map(|x| txt(&x["last_exit"])).filter(|e| !e.is_empty()).unwrap_or_else(|| "it stopped straight away; its log has the details".into()))),
                 (false, None | Some("stopped") | Some("failed")) => Some(Ok(())),
+                _ => None,
+            }
+        }
+        Check::Share(n) => {
+            let share = status["shares"].as_array().and_then(|a| a.iter().find(|s| txt(&s["site"]) == *n).cloned());
+            match (b.on, share) {
+                (true, Some(s)) if s["url"].is_string() => Some(Ok(())),
+                (true, Some(s)) if s["state"] == "failed" => Some(Err({ let e = txt(&s["last_exit"]); if e.is_empty() { "the tunnel stopped; its log has the details".into() } else { e } })),
+                (false, None) => Some(Ok(())),
                 _ => None,
             }
         }

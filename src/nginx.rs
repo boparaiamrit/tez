@@ -165,17 +165,40 @@ pub fn conf_text(cfg: &Config, http: u16, https: u16, cert: &str, key: &str) -> 
             s.push_str(&format!("\t\tlocation / {{\n\t\t\tdefault_type text/plain;\n\t\t\treturn 503 \"tez: PHP {} is not installed. Run: tez php install {}\\n\";\n\t\t}}\n\t}}\n\n", site.php, site.php));
             continue;
         }
-        s.push_str("\t\tlocation / {\n\t\t\ttry_files $uri $uri/ /index.php?$query_string;\n\t\t}\n");
-        s.push_str("\t\tlocation ~ /\\.(?!well-known) {\n\t\t\tdeny all;\n\t\t}\n");
-        s.push_str("\t\tlocation ~ [^/]\\.php(/|$) {\n");
-        s.push_str("\t\t\tfastcgi_split_path_info ^(.+?\\.php)(/.*)$;\n");
-        // try_files empties $fastcgi_path_info, so keep it first.
-        s.push_str("\t\t\tset $tez_path_info $fastcgi_path_info;\n\t\t\ttry_files $fastcgi_script_name =404;\n");
-        s.push_str("\t\t\tinclude fastcgi_params;\n");
-        s.push_str("\t\t\tfastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n\t\t\tfastcgi_param PATH_INFO $tez_path_info;\n");
-        s.push_str(&format!("\t\t\tfastcgi_pass {};\n\t\t}}\n\t}}\n\n", upstream(&site.php)));
+        s.push_str(&php_locations(&site.php, ""));
+        s.push_str("\t}\n\n");
+    }
+    // Shared sites: the same site on its own loopback port for the tunnel, whatever the host name,
+    // with PHP told the request is HTTPS so Laravel builds links with the public address.
+    for share in crate::tunnel::active() {
+        let Some(site) = site_list.iter().find(|x| x.name == share.site) else { continue };
+        if !php::is_installed(&site.php) { continue; }
+        s.push_str(&format!("\t# {} shared ({})\n\tserver {{\n\t\tlisten 127.0.0.1:{} default_server;\n\t\tserver_name _;\n", site.name, share.provider, share.port));
+        s.push_str(&format!("\t\troot {};\n\t\tindex index.php index.html index.htm;\n", q(&paths::fwd(&site.root))));
+        s.push_str(&format!("\t\taccess_log {} tez_json;\n", q(&paths::fwd(&crate::stats::access_log(&site.name)))));
+        let https = if crate::tunnel::https(cfg, &share) {
+            "\t\t\tfastcgi_param HTTPS on;\n\t\t\tfastcgi_param SERVER_PORT 443;\n\t\t\tfastcgi_param REQUEST_SCHEME https;\n\t\t\tfastcgi_param HTTP_X_FORWARDED_PROTO https;\n"
+        } else { "" };
+        s.push_str(&php_locations(&site.php, https));
+        s.push_str("\t}\n\n");
     }
     s.push_str("}\n");
+    s
+}
+
+/// The static-file and PHP locations of a site block; `extra` adds fastcgi params.
+fn php_locations(php: &str, extra: &str) -> String {
+    let mut s = String::new();
+    s.push_str("\t\tlocation / {\n\t\t\ttry_files $uri $uri/ /index.php?$query_string;\n\t\t}\n");
+    s.push_str("\t\tlocation ~ /\\.(?!well-known) {\n\t\t\tdeny all;\n\t\t}\n");
+    s.push_str("\t\tlocation ~ [^/]\\.php(/|$) {\n");
+    s.push_str("\t\t\tfastcgi_split_path_info ^(.+?\\.php)(/.*)$;\n");
+    // try_files empties $fastcgi_path_info, so keep it first.
+    s.push_str("\t\t\tset $tez_path_info $fastcgi_path_info;\n\t\t\ttry_files $fastcgi_script_name =404;\n");
+    s.push_str("\t\t\tinclude fastcgi_params;\n");
+    s.push_str("\t\t\tfastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n\t\t\tfastcgi_param PATH_INFO $tez_path_info;\n");
+    s.push_str(extra);
+    s.push_str(&format!("\t\t\tfastcgi_pass {};\n\t\t}}\n", upstream(php)));
     s
 }
 
