@@ -235,6 +235,8 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
         ("POST", ["api", "php"]) => reply(&mut stream, body_json(&req).and_then(|b| manage::php_install_version(&b))),
         ("GET", ["api", "catalog"]) => json_ok(&mut stream, crate::catalog::get(query_param(&req.query, "refresh").is_some())),
         ("POST", ["api", "php", minor]) => reply(&mut stream, body_json(&req).and_then(|b| manage::php_set(&shared, minor, &b))),
+        ("GET", ["api", "node"]) => json_ok(&mut stream, crate::node::api_get()),
+        ("POST", ["api", "node"]) => reply(&mut stream, body_json(&req).and_then(|b| crate::node::api_set(&shared, &b))),
         ("GET", ["api", "services"]) => json_ok(&mut stream, manage::services_get()),
         ("POST", ["api", "service", name]) => reply(&mut stream, body_json(&req).and_then(|b| manage::service_set(&shared, name, &b))),
         ("GET", ["api", "site", name]) => reply(&mut stream, manage::site_get(name)),

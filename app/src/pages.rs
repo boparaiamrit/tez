@@ -197,6 +197,7 @@ pub(crate) fn jump_overlay(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEle
         ("New site".into(), "plus".into(), Page::NewSite),
         ("Services".into(), "database".into(), Page::Services),
         ("PHP".into(), "code-xml".into(), Page::Php),
+        ("Node.js".into(), "hexagon".into(), Page::Node),
         ("Dumps".into(), "bug".into(), Page::Dumps),
         ("Mail".into(), "mail".into(), Page::Mail),
         ("Logs".into(), "scroll-text".into(), Page::Logs),
@@ -1214,4 +1215,90 @@ pub(crate) fn version_picker(id: &str, p: &Pal, cx: &App, versions: Vec<(String,
 fn service_versions(cx: &App, kind: &str) -> Vec<(String, String)> {
     arr(&tez(cx).catalog["services"][kind]["versions"]).iter().filter(|v| v["available"] != false)
         .map(|v| { let ver = txt(&v["version"]); (ver.clone(), if v["installed"] == true { format!("{ver} · installed") } else { ver }) }).collect()
+}
+
+// ------------------------------------------------------------------ Node.js
+
+/// Node.js: installed versions as cards (default, sites, size; Make default, Remove), and a picker
+/// to install the newest release of any line.
+pub(crate) fn node_page(p: &Pal, cx: &mut App) -> AnyElement {
+    let t = tez(cx);
+    let data = t.node.clone();
+    let sel = t.local.get("node_sel").cloned().unwrap_or_default();
+    let pp = *p;
+    let installed = arr(&data["installed"]);
+    let have: Vec<String> = installed.iter().map(|v| txt(&v["version"])).collect();
+    let cards: Vec<AnyElement> = installed.iter().map(|v| {
+        let ver = txt(&v["version"]);
+        let is_default = v["default"] == true;
+        let users: Vec<String> = arr(&v["sites"]).iter().map(txt).collect();
+        let lts = txt(&v["lts"]);
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(n) = v["npm"].as_str() { facts.push(format!("npm {n}")); }
+        facts.push(if v["corepack"] == true { "pnpm and yarn through corepack".into() } else { "no corepack".into() });
+        if let Some(s) = v["size"].as_u64() { if s > 0 { facts.push(mb(s)); } }
+        let (v1, v2, v3) = (ver.clone(), ver.clone(), ver.clone());
+        cardbox(&pp).id(sid(format!("nodev-{ver}"))).flex_grow(1.).flex_basis(px(300.)).min_w(px(280.))
+            .when(ver == sel, |d| d.border_color(pp.accent_hi))
+            .child(div().flex().flex_row().items_center().gap(px(12.)).px(px(16.)).pt(px(16.)).pb(px(10.))
+                .child(tile(&pp, Tone::Ok, 36., None, Some("hexagon")))
+                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.))
+                    .child(div().flex().flex_row().items_center().gap(px(8.))
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(format!("Node.js {ver}")))
+                        .when(is_default, |d| d.child(pill(&pp, Tone::Accent, "Default", false))))
+                    .child(muted(&pp, if lts.is_empty() { "Current release line".to_string() } else { format!("LTS ({})", cap_first(&lts)) }))))
+            .child(div().px(px(16.)).pb(px(12.)).flex().flex_col().gap(px(4.))
+                .child(muted(&pp, facts.join(" · ")))
+                .child(div().text_size(px(13.)).text_color(pp.text2).child(match users.len() { 0 => "No sites use it".to_string(), 1 => format!("Used by {}", users[0]), n => format!("Used by {} and {} more", users[0], n - 1) })))
+            .child(div().mt_auto().flex().flex_row().gap(px(2.)).px(px(8.)).py(px(6.)).border_t_1().border_color(pp.cardline)
+                .when(!is_default, |d| d.child(text_btn(sid(format!("nd-{v1}")), &pp, "Make default").on_click(move |_, _, cx| send(cx, "/api/node".into(), json!({ "default": v2.clone() }), "Saved; default Node.js changed"))))
+                .child(div().flex_1())
+                .child(text_btn(sid(format!("nr-{v1}")), &pp, "Remove").on_click(move |_, _, cx| send(cx, "/api/node".into(), json!({ "remove": v3.clone() }), "Removed"))))
+            .into_any_element()
+    }).collect();
+    let options: Vec<(String, String)> = arr(&data["available"]).iter().map(|r| {
+        let ver = txt(&r["version"]);
+        let tag = if r["lts"].is_string() { format!("LTS {}", cap_first(&txt(&r["lts"]))) } else { "Current".into() };
+        let done = if have.contains(&ver) { " · installed" } else { "" };
+        (ver.clone(), format!("{ver} · {tag}{done}"))
+    }).collect();
+    let first = arr(&data["available"]).iter().find(|r| r["lts"].is_string()).map(|r| txt(&r["version"])).unwrap_or_default();
+    let note = txt(&data["note"]);
+    let picker = if options.is_empty() {
+        muted(p, if note.is_empty() { "Loading the list of Node.js releases…".to_string() } else { format!("The release list is not available: {note}") }).into_any_element()
+    } else {
+        version_picker("node-new", p, cx, options, first, "Install", Rc::new(|v, cx| send(cx, "/api/node".into(), json!({ "install": v }), "Installing Node.js"))).into_any_element()
+    };
+    let mut out = div().flex().flex_col().gap(px(20.))
+        .child(header(p, "Node.js", "npm and npx come with every version; pnpm and yarn through corepack. Each site runs what its .nvmrc, .node-version or package.json asks for, or the default.", vec![]));
+    if cards.is_empty() {
+        out = out.child(cardbox(p).p(px(20.)).gap(px(12.))
+            .child(strong(p, "No Node.js installed by tez yet"))
+            .child(muted(p, "Vite, npm and npx need it. Until one is installed here, the Node.js on your PATH is used."))
+            .child(picker));
+    } else {
+        out = out.child(div().flex().flex_row().flex_wrap().gap(px(14.)).children(cards))
+            .child(cardbox(p).child(field(p, "Install a version", Some("The newest release of each line, checked against nodejs.org's checksums".into()), false, picker)));
+    }
+    out.into_any_element()
+}
+
+fn cap_first(s: &str) -> String { let mut c = s.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }
+
+/// The "Node.js version" control on a site's Overview: automatic (and why), or a pinned version.
+pub(crate) fn site_node_select(p: &Pal, cx: &App, name: &str, d: &Value) -> Option<Div> {
+    let n = &d["node"];
+    if !n.is_object() { return None; }
+    let now = txt(&n["version"]);
+    let (wanted, source) = (txt(&n["wanted"]), txt(&n["source"]));
+    let auto = if now.is_empty() { "Automatic (none installed)".to_string() }
+        else if n["missing"] == true { format!("Automatic ({now}; {wanted} not installed)") }
+        else if wanted.is_empty() { format!("Automatic (Node.js {now})") }
+        else { format!("Automatic (Node.js {now}, from {source})") };
+    let mut opts = vec![(String::new(), auto)];
+    for v in arr(&tez(cx).node["installed"]) { let ver = txt(&v["version"]); opts.push((ver.clone(), format!("Node.js {ver}"))); }
+    let pinned = txt(&n["pinned"]);
+    if !pinned.is_empty() && !opts.iter().any(|(v, _)| *v == pinned) { opts.push((pinned.clone(), format!("Node.js {pinned}"))); }
+    let n2 = name.to_string();
+    Some(select(&format!("node-{name}"), p, cx, &pinned, opts, 220., Rc::new(move |v, cx| send(cx, format!("/api/site/{n2}"), json!({ "node": if v.is_empty() { Value::Null } else { Value::String(v) } }), "Saved; Node.js switched"))))
 }

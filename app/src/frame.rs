@@ -26,7 +26,7 @@ enum Section { Sites, Services, Php, Debug }
 fn section(page: &Page) -> Section {
     match page {
         Page::Services => Section::Services,
-        Page::Php => Section::Php,
+        Page::Php | Page::Node => Section::Php,
         Page::Dumps | Page::Mail | Page::Logs => Section::Debug,
         _ => Section::Sites,
     }
@@ -340,6 +340,7 @@ fn menu_popover(p: &Pal, key: &str, cx: &App) -> Div {
                 MenuItem { hint: Some(keys("Mod+2")), ..mi("Sites", |_, cx| go(cx, Page::Sites)) },
                 MenuItem { hint: Some(keys("Mod+3")), ..mi("Services", |_, cx| go(cx, Page::Services)) },
                 MenuItem { hint: Some(keys("Mod+4")), ..mi("PHP", |_, cx| go(cx, Page::Php)) },
+                mi("Node.js", |_, cx| go(cx, Page::Node)),
                 MenuItem { hint: Some(keys("Mod+5")), ..mi("Dumps", |_, cx| go(cx, Page::Dumps)) },
                 mi("Mail", |_, cx| go(cx, Page::Mail)),
                 mi("Logs", |_, cx| go(cx, Page::Logs)),
@@ -443,7 +444,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
     let sm = t.site_metrics["sites"].clone();
     // Shared sites show a tower instead of the folder.
     let shared_sites: Vec<String> = arr(&t.status["shares"]).iter().map(|x| txt(&x["site"])).collect();
-    let title = match sec { Section::Sites => "Sites", Section::Services => "Services", Section::Php => "PHP", Section::Debug => "Debug" };
+    let title = match sec { Section::Sites => "Sites", Section::Services => "Services", Section::Php => "PHP and Node.js", Section::Debug => "Debug" };
     let mut list = div().id("side-scroll").flex_1().min_h(px(0.)).overflow_y_scroll().flex().flex_col().gap(px(1.));
     match sec {
         Section::Sites => {
@@ -510,6 +511,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
         Section::Php => {
             let sel = t.php_sel.clone();
             let pp = *p;
+            list = list.child(side_sec(p, "PHP"));
             for v in arr(&t.php["versions"]) {
                 let minor = txt(&v["minor"]);
                 let users = arr(&v["sites"]).len();
@@ -524,6 +526,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                     .child(div().text_size(px(13.)).text_color(pp.text3).child(if v["default"] == true { "default".to_string() } else if users > 0 { format!("{users} site{}", if users == 1 { "" } else { "s" }) } else { String::new() }))
                     .on_click(move |_, _, cx| { cx.global_mut::<Tez>().php_sel = m2.clone(); go(cx, Page::Php); }));
             }
+            node_side(&mut list, p, t, &page);
         }
         Section::Debug => {
             let nd = t.dumps.len().saturating_sub(t.dumps_seen);
@@ -577,6 +580,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
             Page::NewSite => pages::new_site(p, window, cx),
             Page::Services => pages::services_page(p, window, cx),
             Page::Php => pages::php_page(p, window, cx),
+            Page::Node => pages::node_page(p, cx),
             Page::Dumps => pages::dumps_page(p, cx),
             Page::Mail => pages::mail_page(p, cx),
             Page::Logs => pages::logs_page(p, cx),
@@ -1049,12 +1053,14 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
     for m in &installed { opts.push((m.clone(), format!("PHP {m}"))); }
     let n2 = name.to_string();
     let php_sel = pages::select(&format!("php-{name}"), p, cx, if isolated { &php_now } else { "" }, opts, 220., Rc::new(move |v, cx| send(cx, format!("/api/site/{n2}"), json!({ "php": if v.is_empty() { Value::Null } else { Value::String(v) } }), "Saved; PHP switched")));
+    let node_sel = pages::site_node_select(p, cx, name, d);
     let env_val = |k: &str| arr(&d["env"]).iter().flat_map(|g| arr(&g["keys"])).find(|x| txt(&x["key"]) == k).map(|x| txt(&x["value"])).unwrap_or_default();
     let db = env_val("DB_DATABASE");
     let branch = api::git_branch(&txt(&s["path"])).unwrap_or_else(|| "Not a git repository".into());
     let domains = arr(&d["domains"]).len();
     out = out.child(div().flex().flex_col().child(group_title(p, "Site", None))
         .child(field(p, "PHP version", Some("Read from composer.json unless you pick one".into()), false, php_sel))
+        .when_some(node_sel, |g, sel| g.child(field(p, "Node.js version", Some("Read from .nvmrc, .node-version or package.json unless you pick one".into()), false, sel)))
         .child(field(p, "Addresses", Some(format!("{name}.test and {name}.localhost always work")), false, div().text_color(pp.text2).child(if domains == 0 { "No extra domains".to_string() } else { format!("{domains} extra") })))
         .child(field(p, "Database", Some(env_val("DB_CONNECTION")), false, div().text_color(pp.text2).child(if db.is_empty() { "None set".into() } else { db })))
         .child(field(p, "Git", Some("Current branch".into()), false, div().font_family(MONO).text_color(pp.text2).child(branch))));
@@ -1502,4 +1508,21 @@ fn sharing_settings(p: &Pal, s: &Value, window: &mut Window, cx: &mut App) -> (S
             .child(field(p, "Domain", Some("Its DNS points *.domain at the server".into()), false, frp_domain))
             .child(field(p, "The server has HTTPS", Some("Off if it serves plain http".into()), false, https_sw)))
         .into_any_element())
+}
+
+/// The sidebar's Node.js group (under PHP): installed versions, then "Add a version".
+fn node_side(list: &mut Stateful<Div>, p: &Pal, t: &Tez, page: &Page) {
+    let sel = t.local.get("node_sel").cloned().unwrap_or_default();
+    let mut l = std::mem::replace(list, div().id("side-tmp")).child(side_sec(p, "Node.js"));
+    for v in arr(&t.node["installed"]) {
+        let ver = txt(&v["version"]);
+        let users = arr(&v["sites"]).len();
+        let end = if v["default"] == true { "default".to_string() } else if users > 0 { format!("{users} site{}", if users == 1 { "" } else { "s" }) } else { String::new() };
+        let v2 = ver.clone();
+        l = l.child(side_item(format!("nv-{ver}"), p, Some("hexagon"), format!("Node.js {ver}"), Some(end), *page == Page::Node && sel == ver, false, Page::Node)
+            .on_click(move |_, _, cx| { set_local(cx, "node_sel", v2.clone()); go(cx, Page::Node); }));
+    }
+    l = l.child(side_item("nv-add".into(), p, Some("plus"), "Add a version".into(), None, *page == Page::Node && sel.is_empty(), false, Page::Node)
+        .on_click(|_, _, cx| { set_local(cx, "node_sel", String::new()); go(cx, Page::Node); }));
+    *list = l;
 }

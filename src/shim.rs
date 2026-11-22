@@ -16,7 +16,7 @@ use crate::php;
 use crate::sites;
 use std::process::Command;
 
-fn run(mut cmd: Command) -> i32 {
+pub(crate) fn run(mut cmd: Command) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
