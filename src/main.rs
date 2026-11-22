@@ -1,7 +1,7 @@
-//! tez: a fast, native Laravel development environment for Windows.
+//! tez: a fast, native Laravel development environment for Windows, macOS and Linux.
 //!
-//! One binary. Run as `tez` it is the command line and the background daemon; hard-linked as
-//! `php.exe`, `composer.exe` and `exec.exe` it is the version-aware PHP, Composer and Horizon shims.
+//! One binary. Run as `tez` it is the command line and the background daemon; linked as `php`,
+//! `composer` (and `exec` on Windows) it is the version-aware PHP, Composer and Horizon shims.
 
 mod api;
 mod cli;
@@ -17,9 +17,9 @@ mod services;
 mod shim;
 mod sites;
 mod spec;
+mod sys;
 mod util;
 mod web;
-mod win;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

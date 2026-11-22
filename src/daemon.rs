@@ -7,11 +7,10 @@ use crate::project;
 use crate::services;
 use crate::sites;
 use crate::spec::Spec;
+use crate::sys::{self, Hidden, Job};
 use crate::util::R;
 use crate::web;
-use crate::win::{self, Job};
 use std::fs::OpenOptions;
-use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -68,17 +67,22 @@ fn start(p: &mut Proc) {
         let _ = writeln!(f, "\n==== tez: starting {} at {} UTC ====", p.spec.name, crate::util::utc_now());
     }
     let mut cmd = Command::new(&p.spec.exe);
-    if p.spec.raw { for a in &p.spec.args { cmd.raw_arg(a); } } else { cmd.args(&p.spec.args); }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if p.spec.raw { for a in &p.spec.args { cmd.raw_arg(a); } } else { cmd.args(&p.spec.args); }
+    }
+    #[cfg(not(windows))]
+    cmd.args(&p.spec.args);
     cmd.current_dir(&p.spec.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .creation_flags(win::CREATE_NO_WINDOW);
+        .stderr(Stdio::from(err));
+    sys::prepare_child(&mut cmd);
     for (k, v) in &p.spec.env { cmd.env(k, v); }
     match cmd.spawn() {
         Ok(child) => {
-            let job = Job::new();
-            if let Some(j) = &job { j.assign(&child); }
+            let job = Job::attach(&child);
             p.child = Some(child);
             p.job = job;
             p.state = State::Running;
@@ -99,7 +103,7 @@ fn backoff(n: u32) -> Duration { Duration::from_secs((1u64 << n.min(5)).min(30))
 fn stop(p: &mut Proc) {
     if let Some((exe, args)) = p.spec.stop.clone() {
         if p.child.is_some() {
-            let _ = Command::new(exe).args(args).creation_flags(win::CREATE_NO_WINDOW)
+            let _ = Command::new(exe).args(args).hidden()
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
     }
@@ -110,8 +114,7 @@ fn stop(p: &mut Proc) {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    if let Some(job) = p.job.take() { job.terminate(); }
-    if let Some(mut child) = p.child.take() { let _ = child.kill(); let _ = child.wait(); }
+    sys::kill_tree(p.job.take(), p.child.take());
     p.state = State::Stopped;
     p.started = None;
 }
@@ -143,6 +146,9 @@ impl Daemon {
         let rank = |g: &str| match g { "service" => 0, "php" => 1, "web" => 2, _ => 3 };
         self.procs.sort_by_key(|p| rank(&p.spec.group));
     }
+
+    /// Pids of the running processes (each leads its own group on macOS and Linux).
+    pub fn running_pids(&self) -> Vec<u32> { self.procs.iter().filter_map(|p| p.pid()).collect() }
 
     pub fn tick(&mut self) {
         let now = Instant::now();
@@ -263,9 +269,16 @@ pub fn reload(shared: &Shared) -> R<Vec<String>> {
     Ok(notes)
 }
 
+/// SIGTERM, SIGINT or SIGHUP: shut down the same way `tez stop` does.
+fn shutdown_from_signal() {
+    let _ = crate::api::call_port(Config::load().api_port, "POST", "/api/shutdown", Duration::from_secs(5));
+}
+
 pub fn run() -> R<()> {
     paths::ensure_dirs()?;
     let cfg = Config::load();
+    // Anything a crashed daemon left behind would hold the ports this one needs.
+    sys::kill_stale_groups();
     let pidfile = paths::run_dir().join("daemon.pid");
     std::fs::write(&pidfile, std::process::id().to_string())?;
     web::reset_ports();
@@ -273,37 +286,39 @@ pub fn run() -> R<()> {
     let (specs, notes) = plan(&cfg)?;
     let shared: Shared = Arc::new(Mutex::new(Daemon { procs: Vec::new(), started: SystemTime::now(), notes }));
     shared.lock().unwrap().reconcile(specs);
+    sys::on_shutdown_signal(shutdown_from_signal);
 
     let ticker = shared.clone();
-    std::thread::spawn(move || loop {
-        { ticker.lock().unwrap().tick(); }
-        std::thread::sleep(Duration::from_millis(250));
+    std::thread::spawn(move || {
+        let mut last: Vec<u32> = Vec::new();
+        loop {
+            let pids = { let mut d = ticker.lock().unwrap(); d.tick(); d.running_pids() };
+            if pids != last { sys::remember_groups(&pids); last = pids; }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     });
 
     crate::api::serve(shared.clone(), cfg.api_port)?;
     shared.lock().unwrap().stop_all();
+    sys::remember_groups(&[]);
     let _ = std::fs::remove_file(pidfile);
     Ok(())
 }
 
-/// Start the daemon in the background, detached from this console.
+/// Start the daemon in the background, detached from this terminal.
 pub fn spawn_background() -> R<u32> {
     let exe = std::env::current_exe()?;
-    let installed = paths::bin().join("tez.exe");
+    let installed = paths::bin().join(sys::exe("tez"));
     let exe = if installed.exists() { installed } else { exe };
     let log = OpenOptions::new().create(true).append(true).open(paths::logs_dir().join("daemon.log"))?;
-    win::stop_std_inheritance();
-    let base = win::DETACHED_PROCESS | win::CREATE_NEW_PROCESS_GROUP;
-    let mk = |flags: u32| -> std::io::Result<Child> {
-        Command::new(&exe).arg("daemon")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log.try_clone()?))
-            .creation_flags(flags)
-            .current_dir(paths::home())
-            .spawn()
-    };
-    // Break away from the terminal's job (VS Code, Windows Terminal) so closing it keeps tez running.
-    let child = mk(base | win::CREATE_BREAKAWAY_FROM_JOB).or_else(|_| mk(base))?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .current_dir(paths::home());
+    // Windows: break away from the terminal's job (VS Code, Windows Terminal) so closing it keeps
+    // tez running. macOS/Linux: a new session, so the terminal's Ctrl+C and hangup never reach it.
+    let child: Child = sys::spawn_detached(&mut cmd)?;
     Ok(child.id())
 }

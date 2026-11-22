@@ -1,12 +1,18 @@
 //! PHP versions: install, update, extensions and php.ini.
 //!
-//! Builds come from windows.php.net (the official Visual Studio builds, non-thread-safe, x64),
-//! with SHA-256 checked. PECL extensions (redis, mongodb, xdebug, and any other one asked for)
-//! come from downloads.php.net/~windows/pecl, matched to each PHP version.
+//! On Windows, builds come from windows.php.net (the official Visual Studio builds,
+//! non-thread-safe, x64), with SHA-256 checked. PECL extensions (redis, mongodb, xdebug, and any
+//! other one asked for) come from downloads.php.net/~windows/pecl, matched to each PHP version.
+//!
+//! On macOS and Linux, builds are static-php-cli's prebuilt "bulk" set (dl.static-php.dev): one
+//! self-contained `php` and `php-fpm` per version with ~60 extensions compiled in (opcache,
+//! intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole...). Static
+//! builds cannot load extensions, so there is nothing to switch on or add per version.
 
 use crate::config::Config;
 use crate::fetch;
 use crate::paths;
+use crate::sys;
 use crate::util::{self, R};
 use crate::bail;
 use std::path::{Path, PathBuf};
@@ -15,9 +21,21 @@ const RELEASES: &str = "https://windows.php.net/downloads/releases/releases.json
 const BASE: &str = "https://windows.php.net/downloads/releases/";
 const ARCHIVES: &str = "https://windows.php.net/downloads/releases/archives/";
 const PECL: &str = "https://downloads.php.net/~windows/pecl/releases/";
+const STATIC: &str = "https://dl.static-php.dev/static-php-cli/bulk/";
 
 /// Versions tez offers, oldest first (Herd's 7.4 to 8.5, plus 8.6).
 pub const MINORS: &[&str] = &["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"];
+
+/// Versions static-php-cli publishes for macOS and Linux (8.6 is served by FrankenPHP's own PHP).
+const STATIC_MINORS: &[&str] = &["8.0", "8.1", "8.2", "8.3", "8.4", "8.5"];
+
+/// Versions this OS has builds for.
+pub fn available_minors() -> Vec<&'static str> {
+    if cfg!(windows) { MINORS.to_vec() } else { STATIC_MINORS.to_vec() }
+}
+
+/// Static builds carry their extensions inside; only Windows builds load DLLs.
+pub const LOADABLE_EXTENSIONS: bool = cfg!(windows);
 
 /// Extensions bundled with PHP that tez enables, in load order (exif after mbstring).
 const BUNDLED: &[&str] = &[
@@ -32,6 +50,42 @@ pub const PECL_DEFAULT: &[&str] = &["redis", "mongodb", "xdebug"];
 pub struct Release { pub minor: String, pub version: String, pub zip: String, pub sha256: Option<String> }
 
 pub fn releases() -> R<Vec<Release>> {
+    if cfg!(windows) { windows_releases() } else { static_releases() }
+}
+
+/// static-php-cli's names for this machine: ("macos" | "linux", "x86_64" | "aarch64").
+fn static_target() -> (&'static str, &'static str) {
+    (if cfg!(target_os = "macos") { "macos" } else { "linux" }, if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" })
+}
+
+/// The newest patch of each minor that has both a CLI and an FPM build for this machine.
+fn static_releases() -> R<Vec<Release>> {
+    let body = fetch::get_text(&format!("{STATIC}?format=json"))?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let (os, arch) = static_target();
+    let names: Vec<String> = json.as_array().into_iter().flatten().filter_map(|e| e["name"].as_str().map(|s| s.to_string())).collect();
+    Ok(static_pick(&names, os, arch))
+}
+
+fn static_pick(names: &[String], os: &str, arch: &str) -> Vec<Release> {
+    let suffix = format!("-{os}-{arch}.tar.gz");
+    let mut out: Vec<Release> = Vec::new();
+    for n in names {
+        let Some(version) = n.strip_prefix("php-").and_then(|r| r.strip_suffix(&suffix)).and_then(|r| r.strip_suffix("-cli")) else { continue };
+        if !names.contains(&format!("php-{version}-fpm{suffix}")) { continue; }
+        let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
+        if !STATIC_MINORS.contains(&minor.as_str()) { continue; }
+        match out.iter_mut().find(|r| r.minor == minor) {
+            Some(r) if util::cmp_version(version, &r.version) == std::cmp::Ordering::Greater => { r.version = version.to_string(); r.zip = n.clone(); }
+            Some(_) => {}
+            None => out.push(Release { minor, version: version.to_string(), zip: n.clone(), sha256: None }),
+        }
+    }
+    out.sort_by(|a, b| util::cmp_version(&a.minor, &b.minor));
+    out
+}
+
+fn windows_releases() -> R<Vec<Release>> {
     let body = fetch::get_text(RELEASES)?;
     let json: serde_json::Value = serde_json::from_str(&body)?;
     let mut out = Vec::new();
@@ -58,7 +112,7 @@ pub fn installed() -> Vec<(String, String)> {
     let mut v = Vec::new();
     for minor in MINORS {
         let dir = paths::php_dir(minor);
-        if dir.join("php.exe").exists() {
+        if php_exe(minor).exists() {
             let ver = std::fs::read_to_string(dir.join(".tez-version")).unwrap_or_default().trim().to_string();
             v.push((minor.to_string(), ver));
         }
@@ -66,9 +120,10 @@ pub fn installed() -> Vec<(String, String)> {
     v
 }
 
-pub fn is_installed(minor: &str) -> bool { paths::php_dir(minor).join("php.exe").exists() }
-pub fn php_exe(minor: &str) -> PathBuf { paths::php_dir(minor).join("php.exe") }
-pub fn php_cgi_exe(minor: &str) -> PathBuf { paths::php_dir(minor).join("php-cgi.exe") }
+pub fn is_installed(minor: &str) -> bool { php_exe(minor).exists() }
+pub fn php_exe(minor: &str) -> PathBuf { paths::php_dir(minor).join(sys::exe("php")) }
+/// The FastCGI server for web requests: php-cgi on Windows, php-fpm on macOS and Linux.
+pub fn php_cgi_exe(minor: &str) -> PathBuf { paths::php_dir(minor).join(if cfg!(windows) { "php-cgi.exe" } else { "php-fpm" }) }
 
 /// Accept "8.4", "84", "php84", "8.4.12" and return "8.4".
 pub fn normalize(v: &str) -> R<String> {
@@ -83,8 +138,12 @@ pub fn normalize(v: &str) -> R<String> {
 
 /// Install (or update to the newest patch of) one PHP version.
 pub fn install(minor: &str, cfg: &Config) -> R<String> {
+    if !available_minors().contains(&minor) {
+        bail!("PHP {minor} has no {} build; choose one of {}{}", sys::os(), available_minors().join(", "),
+            if minor == "8.6" { " (sites on 8.6 run inside FrankenPHP's own PHP 8.6)" } else { "" });
+    }
     let rel = releases()?.into_iter().find(|r| r.minor == minor);
-    let Some(rel) = rel else { bail!("windows.php.net lists no build for PHP {minor}") };
+    let Some(rel) = rel else { bail!("{} lists no build for PHP {minor}", if cfg!(windows) { "windows.php.net" } else { "static-php.dev" }) };
     let current = std::fs::read_to_string(paths::php_dir(minor).join(".tez-version")).unwrap_or_default();
     if current.trim() == rel.version && is_installed(minor) {
         util::ok(&format!("PHP {} is up to date", rel.version));
@@ -92,14 +151,26 @@ pub fn install(minor: &str, cfg: &Config) -> R<String> {
         return Ok(rel.version);
     }
     util::step(&format!("Downloading PHP {}", rel.version));
-    let url = if fetch::exists(&format!("{BASE}{}", rel.zip)) { format!("{BASE}{}", rel.zip) } else { format!("{ARCHIVES}{}", rel.zip) };
-    let zip = fetch::download(&url, &rel.zip)?;
-    if let Some(sum) = &rel.sha256 { fetch::verify_sha256(&zip, sum)?; }
-
     let dir = paths::php_dir(minor);
     let fresh = dir.with_extension("new");
     let _ = std::fs::remove_dir_all(&fresh);
-    fetch::extract(&zip, &fresh, &[])?;
+    if cfg!(windows) {
+        let url = if fetch::exists(&format!("{BASE}{}", rel.zip)) { format!("{BASE}{}", rel.zip) } else { format!("{ARCHIVES}{}", rel.zip) };
+        let zip = fetch::download(&url, &rel.zip)?;
+        if let Some(sum) = &rel.sha256 { fetch::verify_sha256(&zip, sum)?; }
+        fetch::extract(&zip, &fresh, &[])?;
+    } else {
+        // Two single-file archives: `php` (the CLI) and `php-fpm` (the web pool).
+        for file in [rel.zip.clone(), rel.zip.replace("-cli-", "-fpm-")] {
+            let tgz = fetch::download(&format!("{STATIC}{file}"), &file)?;
+            fetch::extract(&tgz, &fresh, &[])?;
+        }
+        for exe in ["php", "php-fpm"] {
+            let p = fresh.join(exe);
+            if !p.exists() { bail!("the static PHP {} archive has no {exe}", rel.version); }
+            fetch::make_executable(&p)?;
+        }
+    }
     // Extensions added to the old folder (PECL) are reinstalled below; keep nothing else.
     if dir.exists() {
         let old = dir.with_extension("old");
@@ -110,6 +181,13 @@ pub fn install(minor: &str, cfg: &Config) -> R<String> {
     std::fs::rename(&fresh, &dir)?;
     std::fs::write(dir.join(".tez-version"), &rel.version)?;
 
+    if !LOADABLE_EXTENSIONS {
+        let _ = std::fs::remove_file(dir.join(".tez-modules"));
+        let mods = modules(&dir);
+        write_ini(minor, cfg)?;
+        util::ok(&format!("PHP {} installed ({} extensions built in)", rel.version, mods.len()));
+        return Ok(rel.version);
+    }
     for ext in PECL_DEFAULT {
         if let Err(e) = pecl_install(minor, ext, false) {
             util::warn(&format!("{ext} for PHP {minor}: {e}"));
@@ -129,6 +207,9 @@ fn vc_tags() -> &'static [&'static str] { &["vs18", "vs17", "vs16", "vc15"] }
 
 /// Install a PECL extension's DLL into a PHP folder (`ts` for FrankenPHP's thread-safe PHP).
 pub fn pecl_install_into(php_dir: &Path, minor: &str, ext: &str, ts: bool) -> R<String> {
+    if !LOADABLE_EXTENSIONS {
+        bail!("static PHP builds on macOS/Linux include their extensions; PECL add-ons are Windows-only for now (`php -m` lists what PHP {minor} has)");
+    }
     let listing = fetch::get_text(&format!("{PECL}{ext}/")).map_err(|_| format!("PECL has no Windows builds of '{ext}'"))?;
     let mut versions: Vec<String> = fetch::hrefs(&listing)
         .into_iter()
@@ -230,8 +311,31 @@ pub fn ini_values(minor: &str, cfg: &Config) -> Vec<(String, String)> {
     v
 }
 
-/// Every extension DLL in a PHP folder, and whether tez loads it.
+/// The extensions compiled into a static PHP (`php -n -m`), cached beside it in `.tez-modules`.
+pub fn modules(php_dir: &Path) -> Vec<String> {
+    let cache = php_dir.join(".tez-modules");
+    if let Ok(t) = std::fs::read_to_string(&cache) {
+        let v: Vec<String> = t.lines().map(|s| s.to_string()).filter(|s| !s.is_empty()).collect();
+        if !v.is_empty() { return v; }
+    }
+    let exe = php_dir.join(sys::exe("php"));
+    let Ok(out) = std::process::Command::new(&exe).args(["-n", "-m"]).output() else { return Vec::new() };
+    let mut v: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
+        .map(|l| l.trim().to_ascii_lowercase().replace(' ', "_"))
+        .filter(|l| !l.is_empty() && !l.starts_with('['))
+        .collect();
+    v.sort();
+    v.dedup();
+    if !v.is_empty() { let _ = std::fs::write(&cache, v.join("\n")); }
+    v
+}
+
+/// Every extension in a PHP folder: (name, loaded, on by default). On Windows these are the DLLs
+/// in `ext/`; on macOS and Linux, the ones compiled into the static build (always on).
 pub fn extensions_state(php_dir: &Path, minor: &str, cfg: &Config) -> Vec<(String, bool, bool)> {
+    if !LOADABLE_EXTENSIONS {
+        return modules(php_dir).into_iter().map(|n| (n, true, true)).collect();
+    }
     let mut names: Vec<String> = std::fs::read_dir(php_dir.join("ext")).map(|rd| rd.flatten()
         .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
         .filter_map(|n| n.strip_prefix("php_").and_then(|x| x.strip_suffix(".dll")).map(|x| x.to_string()))
@@ -257,13 +361,24 @@ pub fn ini_text(php_dir: &Path, minor: &str, cfg: &Config) -> String {
     let mut s = String::new();
     s.push_str("; Written by tez. Change settings in the dashboard (PHP tab), or add your own in\n");
     s.push_str(&format!("; {}\n\n", paths::config_dir().join("php").join(format!("{minor}.ini")).display()));
+    let ext_line = if LOADABLE_EXTENSIONS { format!("extension_dir = \"{ext_dir}\"\n") } else { String::new() };
     s.push_str(&format!(
-        "[PHP]\nengine = On\nprecision = 14\nserialize_precision = -1\nzend.enable_gc = On\nexpose_php = Off\nvariables_order = \"EGPCS\"\nrequest_order = \"GP\"\nauto_globals_jit = On\ndefault_charset = \"UTF-8\"\nfile_uploads = On\nextension_dir = \"{ext_dir}\"\nauto_prepend_file = \"{prepend}\"\ncurl.cainfo = \"{cacert}\"\nopenssl.cafile = \"{cacert}\"\nffi.enable = preload\n"
+        "[PHP]\nengine = On\nprecision = 14\nserialize_precision = -1\nzend.enable_gc = On\nexpose_php = Off\nvariables_order = \"EGPCS\"\nrequest_order = \"GP\"\nauto_globals_jit = On\ndefault_charset = \"UTF-8\"\nfile_uploads = On\n{ext_line}auto_prepend_file = \"{prepend}\"\ncurl.cainfo = \"{cacert}\"\nopenssl.cafile = \"{cacert}\"\nffi.enable = preload\n"
     ));
     for (k, v) in values.iter().filter(|(k, _)| !k.starts_with("opcache.") && !k.starts_with("xdebug.")) {
         s.push_str(&format!("{k} = {v}\n"));
     }
     s.push('\n');
+    if !LOADABLE_EXTENSIONS {
+        // Static builds: extensions (opcache included) are compiled in; only their settings go here.
+        s.push_str("[opcache]\n");
+        for (k, v) in values.iter().filter(|(k, _)| k.starts_with("opcache.")) {
+            s.push_str(&format!("{k} = {v}\n"));
+        }
+        s.push_str(&format!("opcache.save_comments = 1\nopcache.file_cache = \"{}\"\n", paths::fwd(&opcache_dir)));
+        append_user_ini(&mut s, minor);
+        return s;
+    }
     let state = extensions_state(php_dir, minor, cfg);
     let is_on = |n: &str| state.iter().any(|(x, on, _)| x == n && *on);
     // Load order matters: mbstring before exif, igbinary/msgpack before redis.
@@ -288,6 +403,12 @@ pub fn ini_text(php_dir: &Path, minor: &str, cfg: &Config) -> String {
             s.push_str(&format!("{k} = {v}\n"));
         }
     }
+    append_user_ini(&mut s, minor);
+    s
+}
+
+/// User additions from `config/php/<minor>.ini`.
+fn append_user_ini(s: &mut String, minor: &str) {
     let user = paths::config_dir().join("php").join(format!("{minor}.ini"));
     if let Ok(extra) = std::fs::read_to_string(&user) {
         s.push_str("\n; ---- from ");
@@ -296,7 +417,6 @@ pub fn ini_text(php_dir: &Path, minor: &str, cfg: &Config) -> String {
         s.push_str(&extra);
         s.push('\n');
     }
-    s
 }
 
 pub fn write_ini(minor: &str, cfg: &Config) -> R<()> {
@@ -368,6 +488,22 @@ mod tests {
         assert!(!satisfies("8.4", ">=8.1 <8.4"));
         assert!(satisfies("8.3", "~8.3.0"));
         assert!(!satisfies("8.4", "~8.3.0"));
+    }
+    #[test]
+    fn picks_newest_static_build_with_fpm() {
+        let names: Vec<String> = [
+            "php-8.4.22-cli-linux-x86_64.tar.gz", "php-8.4.22-fpm-linux-x86_64.tar.gz",
+            "php-8.4.23-cli-linux-x86_64.tar.gz", "php-8.4.23-fpm-linux-x86_64.tar.gz",
+            "php-8.4.24-cli-linux-x86_64.tar.gz", // no fpm yet: skipped
+            "php-8.3.32-cli-macos-aarch64.tar.gz", "php-8.3.32-fpm-macos-aarch64.tar.gz",
+            "php-8.5.8-micro-linux-x86_64.tar.gz", "README.txt",
+        ].iter().map(|s| s.to_string()).collect();
+        let linux = static_pick(&names, "linux", "x86_64");
+        assert_eq!(linux.len(), 1);
+        assert_eq!((linux[0].minor.as_str(), linux[0].version.as_str()), ("8.4", "8.4.23"));
+        assert_eq!(linux[0].zip, "php-8.4.23-cli-linux-x86_64.tar.gz");
+        let mac = static_pick(&names, "macos", "aarch64");
+        assert_eq!(mac[0].version, "8.3.32");
     }
     #[test]
     fn normalizes_versions() {

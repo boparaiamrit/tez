@@ -123,7 +123,7 @@ fn split_command(cmd: &str) -> Vec<String> {
 
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let exts = [".exe", ".cmd", ".bat", ""];
+    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
     for dir in std::env::split_paths(&path) {
         for ext in exts {
             let p = dir.join(format!("{name}{ext}"));
@@ -136,7 +136,7 @@ fn which(name: &str) -> Option<PathBuf> {
 /// PATH for child processes: tez's bin first, so `php` and `composer` resolve to tez's versions.
 pub fn child_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
-    format!("{};{current}", paths::bin().display())
+    format!("{}{}{current}", paths::bin().display(), crate::sys::PATH_SEP)
 }
 
 pub fn specs(cfg: &Config, site: &Site) -> R<Vec<Spec>> {

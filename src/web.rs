@@ -1,7 +1,10 @@
 //! The web server: one FrankenPHP process (Caddy inside, plus an embedded PHP 8.6) in front of
 //! every site. It serves HTTPS with its own local certificate authority, HTTP/2, compression and
-//! websockets, and passes PHP requests to a pool of php-cgi processes for the site's version.
-//! Sites on PHP 8.6 run inside FrankenPHP itself.
+//! websockets, and passes PHP requests to a pool for the site's version: php-cgi processes on
+//! Windows, a php-fpm master on macOS and Linux. Sites on PHP 8.6 run inside FrankenPHP itself.
+//!
+//! FrankenPHP publishes no build for Intel Macs, so there tez runs plain Caddy (the same server,
+//! without the embedded PHP 8.6).
 
 use crate::config::Config;
 use crate::fetch;
@@ -9,33 +12,71 @@ use crate::paths;
 use crate::php;
 use crate::sites::{self, Site};
 use crate::spec::Spec;
+use crate::sys;
 use crate::util::{self, R};
 use std::path::PathBuf;
 
 pub const FRANKENPHP_VERSION: &str = "1.14.0";
+pub const CADDY_VERSION: &str = "2.11.9";
 pub const EMBEDDED_PHP: &str = "8.6";
 pub const ADMIN: &str = "127.0.0.1:2019";
 
-pub fn frankenphp_dir() -> PathBuf { paths::service_dir("frankenphp", FRANKENPHP_VERSION) }
-pub fn frankenphp_exe() -> PathBuf { frankenphp_dir().join("frankenphp.exe") }
+/// FrankenPHP's release asset for this machine, or None where only Caddy runs (Intel Macs).
+fn frankenphp_asset() -> Option<&'static str> {
+    match (sys::os(), sys::arch()) {
+        ("windows", _) => Some("frankenphp-windows-x86_64.zip"),
+        ("linux", "aarch64") => Some("frankenphp-linux-aarch64"),
+        ("linux", _) => Some("frankenphp-linux-x86_64"),
+        ("macos", "aarch64") => Some("frankenphp-mac-arm64"),
+        _ => None,
+    }
+}
+
+/// True when the web server has FrankenPHP's own PHP (so 8.6 sites and `php_server` work).
+pub fn has_embedded_php() -> bool { frankenphp_asset().is_some() }
+
+pub fn frankenphp_dir() -> PathBuf {
+    if has_embedded_php() { paths::service_dir("frankenphp", FRANKENPHP_VERSION) } else { paths::service_dir("caddy", CADDY_VERSION) }
+}
+pub fn frankenphp_exe() -> PathBuf { frankenphp_dir().join(sys::exe(if has_embedded_php() { "frankenphp" } else { "caddy" })) }
 
 pub fn install_frankenphp(cfg: &Config) -> R<()> {
     let dir = frankenphp_dir();
     if !frankenphp_exe().exists() {
-        util::step(&format!("Downloading FrankenPHP {FRANKENPHP_VERSION} (web server with embedded PHP {EMBEDDED_PHP})"));
-        let zip = fetch::download(
-            &format!("https://github.com/php/frankenphp/releases/download/v{FRANKENPHP_VERSION}/frankenphp-windows-x86_64.zip"),
-            &format!("frankenphp-windows-x86_64-v{FRANKENPHP_VERSION}.zip"),
-        )?;
-        fetch::extract(&zip, &dir, &[])?;
-        for ext in ["redis", "mongodb"] {
-            if let Err(e) = php::pecl_install_into(&dir, EMBEDDED_PHP, ext, true) {
-                util::warn(&format!("{ext} for the embedded PHP {EMBEDDED_PHP}: {e}"));
+        match frankenphp_asset() {
+            Some(asset) => {
+                util::step(&format!("Downloading FrankenPHP {FRANKENPHP_VERSION} (web server with embedded PHP {EMBEDDED_PHP})"));
+                let url = format!("https://github.com/php/frankenphp/releases/download/v{FRANKENPHP_VERSION}/{asset}");
+                if cfg!(windows) {
+                    let zip = fetch::download(&url, &format!("frankenphp-windows-x86_64-v{FRANKENPHP_VERSION}.zip"))?;
+                    fetch::extract(&zip, &dir, &[])?;
+                    for ext in ["redis", "mongodb"] {
+                        if let Err(e) = php::pecl_install_into(&dir, EMBEDDED_PHP, ext, true) {
+                            util::warn(&format!("{ext} for the embedded PHP {EMBEDDED_PHP}: {e}"));
+                        }
+                    }
+                } else {
+                    // A single static binary (its PHP has redis, intl, pdo_* and more built in).
+                    let bin = fetch::download(&url, &format!("{asset}-v{FRANKENPHP_VERSION}"))?;
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::copy(&bin, frankenphp_exe())?;
+                    fetch::make_executable(&frankenphp_exe())?;
+                }
+                util::ok(&format!("FrankenPHP {FRANKENPHP_VERSION}"));
+            }
+            None => {
+                util::step(&format!("Downloading Caddy {CADDY_VERSION} (FrankenPHP has no build for this Mac)"));
+                let file = format!("caddy_{CADDY_VERSION}_mac_amd64.tar.gz");
+                let tgz = fetch::download(&format!("https://github.com/caddyserver/caddy/releases/download/v{CADDY_VERSION}/{file}"), &file)?;
+                fetch::extract(&tgz, &dir, &[])?;
+                fetch::make_executable(&frankenphp_exe())?;
+                util::ok(&format!("Caddy {CADDY_VERSION}"));
             }
         }
-        util::ok(&format!("FrankenPHP {FRANKENPHP_VERSION}"));
     }
-    std::fs::write(dir.join("php.ini"), php::ini_text(&dir, EMBEDDED_PHP, cfg))?;
+    if has_embedded_php() {
+        std::fs::write(dir.join("php.ini"), php::ini_text(&dir, EMBEDDED_PHP, cfg))?;
+    }
     Ok(())
 }
 
@@ -48,11 +89,43 @@ pub fn cgi_port(minor: &str, n: u16) -> u16 {
 
 fn workers(cfg: &Config) -> u16 { cfg.php_workers.clamp(1, 10) }
 
-/// The php-cgi pools for every PHP version a site needs.
+/// FastCGI addresses the web server sends a version's requests to: one php-cgi per worker on
+/// Windows, one php-fpm master (with `workers` children) elsewhere.
+pub fn cgi_upstreams(minor: &str, cfg: &Config) -> Vec<String> {
+    let n = if cfg!(windows) { workers(cfg) } else { 1 };
+    (0..n).map(|i| format!("127.0.0.1:{}", cgi_port(minor, i))).collect()
+}
+
+/// php-fpm's pool for one version: a fixed set of children, environment passed through.
+fn write_fpm_conf(minor: &str, cfg: &Config) -> PathBuf {
+    let dir = paths::php_dir(minor);
+    let conf = dir.join("php-fpm.conf");
+    let text = format!(
+        "; Written by tez on every start.\n[global]\nerror_log = /dev/stderr\ndaemonize = no\nlog_level = warning\n\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = {n}\npm.max_requests = 0\nclear_env = no\ncatch_workers_output = yes\ndecorate_workers_output = no\nrequest_terminate_timeout = 300\n",
+        port = cgi_port(minor, 0),
+        n = workers(cfg)
+    );
+    if std::fs::read_to_string(&conf).ok().as_deref() != Some(text.as_str()) { let _ = std::fs::write(&conf, text); }
+    conf
+}
+
+/// The PHP pools for every PHP version a site needs.
 pub fn cgi_specs(cfg: &Config) -> Vec<Spec> {
     let mut out = Vec::new();
     for minor in sites::needed_php(cfg) {
-        if minor == EMBEDDED_PHP { continue; }
+        if minor == EMBEDDED_PHP && has_embedded_php() { continue; }
+        if !cfg!(windows) {
+            let conf = write_fpm_conf(&minor, cfg);
+            let dir = paths::php_dir(&minor);
+            out.push(
+                Spec::new(format!("php-{minor}"), "php", php::php_cgi_exe(&minor))
+                    .args(["-F".to_string(), "-y".into(), conf.display().to_string(), "-c".into(), dir.join("php.ini").display().to_string()])
+                    .cwd(dir.clone())
+                    .env("PHPRC", dir.display().to_string())
+                    .port(cgi_port(&minor, 0)),
+            );
+            continue;
+        }
         for n in 0..workers(cfg) {
             let port = cgi_port(&minor, n);
             out.push(
@@ -82,7 +155,8 @@ pub fn effective_ports(cfg: &Config) -> (u16, u16, Vec<String>) {
     let mut notes = Vec::new();
     let mut pick = |want: u16, alt: u16, what: &str| -> u16 {
         if util::port_free(want) { return want; }
-        notes.push(format!("port {want} is in use by another program, so {what} uses {alt}"));
+        let why = if cfg!(target_os = "linux") && want < 1024 && !sys::is_elevated() { "needs root on Linux" } else { "is in use by another program" };
+        notes.push(format!("port {want} {why}, so {what} uses {alt}"));
         alt
     };
     let http = pick(cfg.http_port, 8088, "HTTP");
@@ -103,7 +177,7 @@ pub fn caddyfile(cfg: &Config) -> String {
     s.push_str(&format!("\thttp_port {http}\n\thttps_port {https}\n"));
     s.push_str("\tlocal_certs\n\tskip_install_trust\n\tauto_https disable_redirects\n");
     s.push_str(&format!("\tstorage file_system \"{}\"\n", paths::fwd(&paths::caddy_storage())));
-    s.push_str("\tfrankenphp\n");
+    if has_embedded_php() { s.push_str("\tfrankenphp\n"); }
     s.push_str("\tlog {\n\t\tlevel WARN\n\t}\n}\n\n");
 
     // The dashboard.
@@ -131,10 +205,10 @@ pub fn caddyfile(cfg: &Config) -> String {
         s.push_str(" {\n\ttls internal\n");
         s.push_str(&format!("\troot * \"{}\"\n", paths::fwd(&site.root)));
         s.push_str("\tencode zstd gzip\n");
-        if site.php == EMBEDDED_PHP {
+        if site.php == EMBEDDED_PHP && has_embedded_php() {
             s.push_str("\tphp_server\n");
         } else if php::is_installed(&site.php) {
-            let ups: Vec<String> = (0..workers(cfg)).map(|n| format!("127.0.0.1:{}", cgi_port(&site.php, n))).collect();
+            let ups = cgi_upstreams(&site.php, cfg);
             s.push_str(&format!("\tphp_fastcgi {} {{\n", ups.join(" ")));
             s.push_str("\t\tlb_policy least_conn\n\t\tlb_try_duration 30s\n\t\tlb_try_interval 50ms\n\t\tdial_timeout 2s\n\t\tread_timeout 300s\n\t}\n");
             s.push_str("\tfile_server\n");

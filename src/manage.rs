@@ -12,8 +12,8 @@ use crate::util::{self, R};
 use crate::web;
 use crate::bail;
 use serde_json::{json, Value};
+use crate::sys::{self, Hidden};
 use std::collections::BTreeMap;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -28,7 +28,8 @@ pub fn settings_get() -> Value {
         "links": cfg.links, "dumps": paths::run_dir().join("dumps-on").exists(),
         "autostart": autostart_enabled(), "home": paths::home(),
         "php_installed": php::installed().into_iter().map(|(m, _)| m).collect::<Vec<_>>(),
-        "ca_trusted": ca_trusted(), "free_disk": crate::win::free_bytes(&paths::home()),
+        "ca_trusted": ca_trusted(), "free_disk": sys::free_bytes(&paths::home()),
+        "os": sys::os(), "arch": sys::arch(),
     })
 }
 
@@ -67,30 +68,66 @@ pub fn settings_set(shared: &Shared, body: &Value) -> R<Value> {
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
+/// Where "start at sign-in" lives on macOS (a LaunchAgent) and Linux (an XDG autostart entry).
+fn autostart_file() -> PathBuf {
+    let home = paths::user_home();
+    if cfg!(target_os = "macos") { home.join("Library").join("LaunchAgents").join("dev.tez.plist") }
+    else { home.join(".config").join("autostart").join("tez.desktop") }
+}
+
 pub fn autostart_enabled() -> bool {
+    if !cfg!(windows) { return autostart_file().exists(); }
     Command::new(paths::system32("reg.exe")).args(["query", RUN_KEY, "/v", "tez"])
-        .creation_flags(crate::win::CREATE_NO_WINDOW).stdout(Stdio::null()).stderr(Stdio::null())
+        .hidden().stdout(Stdio::null()).stderr(Stdio::null())
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
 pub fn set_autostart(on: bool) -> R<()> {
-    let exe = paths::bin().join("tez.exe");
+    let exe = paths::bin().join(sys::exe("tez"));
+    if !cfg!(windows) {
+        let file = autostart_file();
+        if !on { let _ = std::fs::remove_file(&file); return Ok(()); }
+        if let Some(d) = file.parent() { std::fs::create_dir_all(d)?; }
+        let tez = exe.display().to_string();
+        let text = if cfg!(target_os = "macos") {
+            let esc = tez.replace('&', "&amp;").replace('<', "&lt;");
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key><string>dev.tez</string>\n\t<key>ProgramArguments</key>\n\t<array><string>{esc}</string><string>start</string><string>--quiet</string></array>\n\t<key>RunAtLoad</key><true/>\n</dict>\n</plist>\n")
+        } else {
+            format!("[Desktop Entry]\nType=Application\nName=tez\nComment=Start tez's Laravel services\nExec=\"{tez}\" start --quiet\nX-GNOME-Autostart-enabled=true\nTerminal=false\n")
+        };
+        std::fs::write(&file, text)?;
+        return Ok(());
+    }
     let st = if on {
         Command::new(paths::system32("reg.exe")).args(["add", RUN_KEY, "/v", "tez", "/t", "REG_SZ", "/f", "/d", &format!("\"{}\" start --quiet", exe.display())])
-            .creation_flags(crate::win::CREATE_NO_WINDOW).stdout(Stdio::null()).status()?
+            .hidden().stdout(Stdio::null()).status()?
     } else {
         Command::new(paths::system32("reg.exe")).args(["delete", RUN_KEY, "/v", "tez", "/f"])
-            .creation_flags(crate::win::CREATE_NO_WINDOW).stdout(Stdio::null()).stderr(Stdio::null()).status()?
+            .hidden().stdout(Stdio::null()).stderr(Stdio::null()).status()?
     };
     if on && !st.success() { bail!("could not register tez to start at sign-in"); }
     Ok(())
 }
 
-fn ca_trusted() -> bool {
+/// Where `tez trust` puts the local CA on Linux (Debian/Ubuntu, then Fedora/RHEL layout).
+pub const LINUX_CA_FILES: &[(&str, &str)] = &[
+    ("/usr/local/share/ca-certificates/tez-local-ca.crt", "update-ca-certificates"),
+    ("/etc/pki/ca-trust/source/anchors/tez-local-ca.crt", "update-ca-trust"),
+];
+
+pub fn ca_trusted() -> bool {
     let root = paths::local_ca_root();
     if !root.exists() { return false; }
+    if cfg!(target_os = "macos") {
+        return Command::new("security").args(["verify-cert", "-c"]).arg(&root).stdout(Stdio::null()).stderr(Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false);
+    }
+    if !cfg!(windows) {
+        let ours = std::fs::read(&root).unwrap_or_default();
+        return LINUX_CA_FILES.iter().any(|(f, _)| std::fs::read(f).map(|t| t == ours).unwrap_or(false));
+    }
     let out = Command::new(paths::system32("certutil.exe")).args(["-verify"]).arg(&root)
-        .creation_flags(crate::win::CREATE_NO_WINDOW).output();
+        .hidden().output();
     out.map(|o| { let t = String::from_utf8_lossy(&o.stdout); !t.contains("CERT_E_UNTRUSTEDROOT") && t.contains("completed successfully") }).unwrap_or(false)
 }
 
@@ -109,11 +146,15 @@ pub fn php_get() -> Value {
                 "overridden": own.keys().collect::<Vec<_>>(), "extensions": exts, "sites": users })
     }).collect();
     let catalog: Vec<Value> = php::INI.iter().map(|(k, d, about)| json!({ "key": k, "default": d, "about": about })).collect();
-    json!({ "versions": versions, "catalog": catalog, "all": cfg.php_ini, "available": php::MINORS })
+    // `extensions_switchable`: false for static builds (macOS/Linux), where every extension is
+    // compiled in and always on, and PECL installs are not possible.
+    json!({ "versions": versions, "catalog": catalog, "all": cfg.php_ini, "available": php::available_minors(),
+            "extensions_switchable": php::LOADABLE_EXTENSIONS, "pecl": php::LOADABLE_EXTENSIONS })
 }
 
 /// Every extension PECL publishes Windows builds for (cached for a day).
 pub fn pecl_catalog() -> R<Value> {
+    if !php::LOADABLE_EXTENSIONS { return Ok(json!({ "extensions": [], "note": "static PHP builds include their extensions; PECL add-ons are Windows-only for now" })); }
     let cache = paths::cache_dir().join("pecl-index.json");
     let fresh = cache.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() < 86_400).unwrap_or(false)).unwrap_or(false);
     if fresh { if let Ok(t) = std::fs::read_to_string(&cache) { if let Ok(v) = serde_json::from_str(&t) { return Ok(v); } } }
@@ -155,6 +196,7 @@ pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
     }
     if let Some(map) = body["extensions"].as_object() {
         if all { bail!("turn extensions on or off for one version at a time"); }
+        if !php::LOADABLE_EXTENSIONS && !map.is_empty() { bail!("static PHP builds on {} have every extension compiled in and always on", sys::os()); }
         let dir = paths::php_dir(&minor);
         let state = php::extensions_state(&dir, &minor, &cfg);
         for (name, v) in map {
@@ -174,7 +216,7 @@ pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
     let _ = web::install_frankenphp(&cfg);
     // php -v with the new ini catches mistakes before the workers restart.
     let check_minor = if all { cfg.default_php.clone() } else { minor.clone() };
-    let check = Command::new(php::php_exe(&check_minor)).arg("-v").creation_flags(crate::win::CREATE_NO_WINDOW).output()?;
+    let check = Command::new(php::php_exe(&check_minor)).arg("-v").hidden().output()?;
     let warnings = String::from_utf8_lossy(&check.stderr).trim().to_string() + &String::from_utf8_lossy(&check.stdout).lines().filter(|l| l.contains("Warning")).collect::<Vec<_>>().join("\n");
     let mut d = shared.lock().unwrap();
     if all { d.restart("php"); } else { d.restart(&format!("php-{minor}")); }
@@ -201,14 +243,16 @@ pub fn service_instances(cfg: &Config) -> Vec<Value> {
                 "secret": k.contains("key") || k.contains("password"),
             })).collect();
             let title = if key.contains('@') { format!("{} {}", i.title, services::series(&key, &version)) } else { i.title.to_string() };
+            let avail = services::available(&key);
             let mut v = json!({
                 "name": key, "kind": i.name, "title": title, "about": i.about, "version": version, "full_version": full.trim(), "port": port,
                 "installed": services::is_installed(&key, &version), "enabled": configured && sc.enabled,
                 "options": options, "env": env_snippet(&key, port, &sc), "versions": i.versions,
+                "available": avail.is_ok(), "unavailable_reason": avail.err(),
             });
             if i.name == "postgres" {
                 v["extensions"] = json!(services::pg_extensions_installed(&services::series("postgres", &version)));
-                v["extension_catalog"] = json!(services::PG_EXTENSIONS);
+                v["extension_catalog"] = json!(if services::pg_extensions_available() { services::PG_EXTENSIONS } else { &[] });
             }
             out.push(v);
         }
@@ -421,7 +465,7 @@ fn site_file(s: &sites::Site, rel: &str) -> R<PathBuf> {
     let ok = matches!(rel.as_str(), ".env" | ".env.example" | "tez.json" | ".php-version")
         || (rel.starts_with("config/") && rel.ends_with(".php") && rel[7..rel.len() - 4].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     if !ok { bail!("{rel} cannot be edited from the dashboard"); }
-    Ok(s.path.join(rel.replace('/', "\\")))
+    Ok(paths::join_rel(&s.path, &rel))
 }
 
 pub fn file_get(name: &str, rel: &str) -> R<String> {
@@ -441,7 +485,7 @@ pub fn file_set(name: &str, rel: &str, content: &str) -> R<Value> {
     std::fs::write(&p, content)?;
     // A PHP config file with a syntax error would take the whole site down: check it.
     if rel.ends_with(".php") {
-        let out = Command::new(php::php_exe(&s.php)).args(["-l"]).arg(&p).creation_flags(crate::win::CREATE_NO_WINDOW).output()?;
+        let out = Command::new(php::php_exe(&s.php)).args(["-l"]).arg(&p).hidden().output()?;
         if !out.status.success() {
             return Ok(json!({ "ok": true, "warning": String::from_utf8_lossy(&out.stdout).trim().to_string() }));
         }
@@ -455,7 +499,7 @@ pub fn effective_config(name: &str, key: &str) -> R<Value> {
     let s = site(name)?;
     let code = format!("echo json_encode(config('{key}'), JSON_PARTIAL_OUTPUT_ON_ERROR);");
     let out = Command::new(php::php_exe(&s.php)).args(["artisan", "tinker", "--execute", &code])
-        .current_dir(&s.path).creation_flags(crate::win::CREATE_NO_WINDOW).output()?;
+        .current_dir(&s.path).hidden().output()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let start = text.find(['{', '[']).unwrap_or(0);
     Ok(serde_json::from_str(text[start..].trim()).unwrap_or(json!({ "error": text.trim() })))
@@ -479,20 +523,21 @@ pub fn start_job(args: &[String], cwd: Option<&Path>, title: &str) -> R<u32> {
     let f = std::fs::File::create(&log)?;
     let bin = paths::bin();
     let (exe, rest): (PathBuf, Vec<String>) = match first {
-        "composer" => (bin.join("composer.exe"), args[1..].to_vec()),
-        "artisan" => (bin.join("php.exe"), std::iter::once("artisan".to_string()).chain(args[1..].iter().cloned()).collect()),
-        "npm" => {
+        "composer" => (bin.join(sys::exe("composer")), args[1..].to_vec()),
+        "artisan" => (bin.join(sys::exe("php")), std::iter::once("artisan".to_string()).chain(args[1..].iter().cloned()).collect()),
+        "npm" if cfg!(windows) => {
             let node_dir = which_dir("node.exe").ok_or("Node.js is not installed")?;
             (node_dir.join("node.exe"), std::iter::once(node_dir.join("node_modules\\npm\\bin\\npm-cli.js").display().to_string()).chain(args[1..].iter().cloned()).collect())
         }
-        _ => (bin.join("tez.exe"), args.to_vec()),
+        "npm" => (which_dir("npm").ok_or("Node.js is not installed")?.join("npm"), args[1..].to_vec()),
+        _ => (bin.join(sys::exe("tez")), args.to_vec()),
     };
     let child = Command::new(exe).args(rest)
         .current_dir(cwd.map(|p| p.to_path_buf()).unwrap_or_else(paths::home))
         .env("PATH", project::child_path())
         .env("NO_COLOR", "1")
         .stdin(Stdio::null()).stdout(Stdio::from(f.try_clone()?)).stderr(Stdio::from(f))
-        .creation_flags(crate::win::CREATE_NO_WINDOW)
+        .hidden()
         .spawn()?;
     jobs.push(JobRec { id, title: title.to_string(), child: Some(child), state: "running".into(), log, started: util::utc_now() });
     Ok(id)
@@ -538,7 +583,7 @@ pub fn job_start(body: &Value) -> R<Value> {
 pub struct GhAccount { pub host: String, pub login: String, pub active: bool, pub protocol: String }
 
 pub fn gh_accounts() -> Vec<GhAccount> {
-    let out = Command::new("gh").args(["auth", "status"]).creation_flags(crate::win::CREATE_NO_WINDOW).output();
+    let out = Command::new("gh").args(["auth", "status"]).hidden().output();
     let Ok(out) = out else { return Vec::new() };
     // gh prints this on stdout or stderr depending on version.
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -564,7 +609,7 @@ pub fn gh_accounts() -> Vec<GhAccount> {
 pub struct SshHost { pub alias: String, pub hostname: String, pub user: String, pub identity: String, pub key_exists: bool }
 
 pub fn ssh_hosts() -> Vec<SshHost> {
-    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    let home = paths::user_home();
     let text = std::fs::read_to_string(home.join(".ssh").join("config")).unwrap_or_default();
     let mut hosts: Vec<SshHost> = Vec::new();
     for line in text.lines() {
@@ -580,7 +625,8 @@ pub fn ssh_hosts() -> Vec<SshHost> {
             "hostname" => if let Some(h) = hosts.last_mut() { h.hostname = v; },
             "user" => if let Some(h) = hosts.last_mut() { h.user = v; },
             "identityfile" => if let Some(h) = hosts.last_mut() {
-                let p = v.trim_matches('"').replacen("~", &home.display().to_string(), 1).replace('/', "\\");
+                let p = v.trim_matches('"').replacen("~", &home.display().to_string(), 1);
+                let p = if cfg!(windows) { p.replace('/', "\\") } else { p };
                 h.key_exists = Path::new(&p).exists();
                 h.identity = p;
             },
@@ -615,7 +661,7 @@ pub fn route_for(account: &GhAccount, hosts: &[SshHost]) -> String {
 pub fn identities() -> Value {
     let accounts = gh_accounts();
     let hosts = ssh_hosts();
-    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default());
+    let home = paths::user_home();
     let keys: Vec<String> = std::fs::read_dir(home.join(".ssh")).map(|rd| rd.flatten()
         .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
         .filter(|n| n.ends_with(".pub")).collect()).unwrap_or_default();
@@ -633,18 +679,23 @@ fn gh_as(account: Option<&str>, args: &[&str]) -> R<String> {
         _ => None,
     };
     let mut cmd = Command::new("gh");
-    cmd.args(args).creation_flags(crate::win::CREATE_NO_WINDOW).stdin(Stdio::null());
+    cmd.args(args).hidden().stdin(Stdio::null());
     if let Some(t) = token { cmd.env("GH_TOKEN", t); }
-    let out = cmd.output().map_err(|_| "GitHub CLI (gh) is not installed: winget install GitHub.cli".to_string())?;
+    let out = cmd.output().map_err(|_| gh_missing())?;
     if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+fn gh_missing() -> String {
+    let how = match sys::os() { "windows" => "winget install GitHub.cli", "macos" => "brew install gh", _ => "see https://cli.github.com" };
+    format!("GitHub CLI (gh) is not installed: {how}")
+}
+
 fn gh(args: &[&str], stdin: Option<&str>) -> R<String> {
     let mut cmd = Command::new("gh");
-    cmd.args(args).creation_flags(crate::win::CREATE_NO_WINDOW).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).hidden().stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin.is_some() { cmd.stdin(Stdio::piped()); } else { cmd.stdin(Stdio::null()); }
-    let mut child = cmd.spawn().map_err(|_| "GitHub CLI (gh) is not installed: winget install GitHub.cli".to_string())?;
+    let mut child = cmd.spawn().map_err(|_| gh_missing())?;
     if let Some(input) = stdin {
         use std::io::Write;
         child.stdin.take().unwrap().write_all(input.as_bytes())?;
@@ -673,7 +724,8 @@ pub fn github_repos(owner: &str, account: Option<&str>) -> R<Value> {
     Ok(json!({ "repos": v }))
 }
 
-/// The token goes straight to gh's own credential store (Windows Credential Manager); tez never keeps it.
+/// The token goes straight to gh's own credential store (Windows Credential Manager, the macOS
+/// Keychain, or the Linux keyring); tez never keeps it.
 pub fn github_login(token: &str) -> R<Value> {
     let t = token.trim();
     if t.is_empty() || t.contains(char::is_whitespace) { bail!("paste a GitHub token (it starts with ghp_ or github_pat_)"); }

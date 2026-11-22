@@ -10,6 +10,6 @@ if (PHP_SAPI === 'cli' && PHP_OS_FAMILY === 'Windows' && !function_exists('pcntl
     unset($tezCmd);
 }
 
-if (!function_exists('dump') && is_file((getenv('TEZ_HOME') ?: getenv('USERPROFILE') . '\\.tez') . '\\run\\dumps-on')) {
+if (!function_exists('dump') && is_file((getenv('TEZ_HOME') ?: (getenv(PHP_OS_FAMILY === 'Windows' ? 'USERPROFILE' : 'HOME') . DIRECTORY_SEPARATOR . '.tez')) . DIRECTORY_SEPARATOR . 'run' . DIRECTORY_SEPARATOR . 'dumps-on')) {
     require __DIR__ . DIRECTORY_SEPARATOR . 'dumps.php';
 }

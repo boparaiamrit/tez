@@ -9,9 +9,9 @@ use crate::php;
 use crate::project;
 use crate::services;
 use crate::sites;
+use crate::sys;
 use crate::util::{self, bold, dim, green, red, yellow, R};
 use crate::web;
-use crate::win;
 use crate::bail;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -36,10 +36,11 @@ fn dispatch(args: &[String]) -> R<()> {
         ["daemon"] => daemon::run(),
         ["start"] => start(),
         ["start", "--quiet"] => start_opts(true),
-        ["app"] => { if !launch_app(true) { bail!("the desktop app is not installed (tez-app.exe beside tez.exe)"); } Ok(()) }
+        ["app"] => { if !launch_app(true) { bail!("the desktop app is not installed ({} beside {})", sys::exe("tez-app"), sys::exe("tez")); } Ok(()) }
         ["stop"] => stop(),
         ["restart"] => { stop()?; start() }
         ["restart", name] => proc_action(name, "restart"),
+        ["status", "--json"] => { println!("{}", api::call("GET", "/api/status")?); Ok(()) }
         ["status"] | ["ps"] => status(),
         ["open"] | ["dashboard"] => open_dashboard(),
         ["php"] | ["php", "list"] => php_list(),
@@ -114,14 +115,15 @@ fn help() {
     println!(
         "{}  {}\n\n{}",
         bold("tez"),
-        dim("fast native Laravel development on Windows"),
+        dim("fast native Laravel development on Windows, macOS and Linux"),
         r#"Getting started
-  tez install [--all] [--php 8.1,8.4]   set up PHP, the web server and services
+  tez install [--all] [--php 8.1,8.4] [--services redis,postgres|none]
+                                        set up PHP, the web server and services
   tez start | stop | restart            run everything in the background
-  tez status                            what is running, memory, URLs
+  tez status [--json]                   what is running, memory, URLs
   tez open                              the dashboard (sites, services, logs, dumps, mail)
 
-Sites (folders in ~\Sites are served at https://<folder>.test)
+Sites (folders in ~/Sites are served at https://<folder>.test)
   tez park [dir] | unpark [dir]         serve every folder inside dir
   tez link [name] | unlink [name]       serve the current folder
   tez sites                             list sites with PHP versions and URLs
@@ -134,7 +136,7 @@ PHP
   tez php update [8.4]                  newest patch release
   tez use 8.4                           default version
   tez isolate 8.1 [site]                pin a site; unisolate to undo
-  tez which                             the php.exe used in this folder
+  tez which                             the php binary used in this folder
   tez ext install imagick [--php all]   any PECL extension
   tez xdebug on|off                     tez dumps on|off
 
@@ -152,7 +154,7 @@ Projects
   tez up | down                         run Horizon/queue, Reverb, Vite, scheduler
   tez procs                             what `tez up` would run, and why
   tez logs <name> [-f] [-n 100]         e.g. tez logs postgres, tez logs mysite/horizon
-  tez doctor [--fix]                    check Windows for what slows PHP down"#
+  tez doctor [--fix]                    check this computer for what slows PHP down"#
     );
 }
 
@@ -178,13 +180,19 @@ fn place_binary(src: &Path, dest: &Path) -> R<()> {
 pub fn install_binaries() -> R<()> {
     let me = std::env::current_exe()?;
     let bin = paths::bin();
-    let tez = bin.join("tez.exe");
+    let tez = bin.join(sys::exe("tez"));
     if !same_file(&me, &tez) { place_binary(&me, &tez)?; }
-    for name in ["php.exe", "composer.exe", "exec.exe"] {
-        let dest = bin.join(name);
-        if dest.exists() && std::fs::remove_file(&dest).is_err() {
+    // Windows: hard links (php.exe, composer.exe, exec.exe). macOS/Linux: symlinks to tez; the
+    // shell's own `exec` builtin covers Horizon there, so no exec link.
+    let shims: &[&str] = if cfg!(windows) { &["php", "composer", "exec"] } else { &["php", "composer"] };
+    for name in shims {
+        let dest = bin.join(sys::exe(name));
+        if (dest.exists() || dest.symlink_metadata().is_ok()) && std::fs::remove_file(&dest).is_err() {
             std::fs::rename(&dest, dest.with_extension(format!("old-{}", std::process::id())))?;
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(sys::exe("tez"), &dest)?;
+        #[cfg(windows)]
         if std::fs::hard_link(&tez, &dest).is_err() { std::fs::copy(&tez, &dest)?; }
     }
     // Tidy leftovers from earlier upgrades that are no longer in use.
@@ -193,10 +201,10 @@ pub fn install_binaries() -> R<()> {
             if e.file_name().to_string_lossy().contains(".old-") { let _ = std::fs::remove_file(e.path()); }
         }
     }
-    // The desktop app (tray icon and window) ships beside tez.exe.
+    // The desktop app (tray icon and window) ships beside tez.
     if let Some(dir) = me.parent() {
-        let app = dir.join("tez-app.exe");
-        let dest = bin.join("tez-app.exe");
+        let app = dir.join(sys::exe("tez-app"));
+        let dest = bin.join(sys::exe("tez-app"));
         if app.exists() && !same_file(&app, &dest) {
             let newer = match (app.metadata().and_then(|m| m.modified()), dest.metadata().and_then(|m| m.modified())) { (Ok(a), Ok(b)) => a > b, _ => true };
             if newer { place_binary(&app, &dest)?; }
@@ -247,7 +255,28 @@ fn user_path() -> String {
     out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
+/// macOS/Linux: one guarded line in the shell start-up files that exist (zsh, bash, profile).
+fn ensure_on_path_unix() -> R<bool> {
+    let bin = paths::bin().display().to_string();
+    let line = format!("export PATH=\"{bin}:$PATH\"  # tez");
+    let home = paths::user_home();
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let mut files: Vec<PathBuf> = [".zshrc", ".bashrc", ".profile"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect();
+    // A new account may have none yet: create the one its shell reads.
+    if files.is_empty() { files.push(home.join(if shell.ends_with("zsh") { ".zshrc" } else { ".profile" })); }
+    let mut added = false;
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        if text.lines().any(|l| l.contains(&bin) && l.contains("PATH")) { continue; }
+        let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+        std::fs::write(&f, format!("{text}{sep}{line}\n"))?;
+        added = true;
+    }
+    Ok(added)
+}
+
 fn ensure_on_path() -> R<bool> {
+    if !cfg!(windows) { return ensure_on_path_unix(); }
     let bin = paths::bin().display().to_string();
     let current = user_path();
     if current.split(';').any(|p| p.trim_end_matches('\\').eq_ignore_ascii_case(&bin)) { return Ok(false); }
@@ -262,22 +291,34 @@ fn install(rest: &[&str]) -> R<()> {
     paths::ensure_dirs()?;
     let fresh = !paths::config_file().exists();
     let mut cfg = Config::load();
-    if fresh {
+    let flag = |name: &str| rest.iter().position(|a| *a == name).and_then(|i| rest.get(i + 1)).copied();
+    // `--services redis,postgres` (or `none`) picks the services instead of the defaults.
+    let picked: Option<Vec<String>> = flag("--services").map(|l| l.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "none").collect());
+    if let Some(list) = &picked {
+        for name in list {
+            let i = services::info(name)?;
+            services::available(name)?;
+            cfg.services.entry(name.clone()).or_insert(ServiceConfig { version: i.version.into(), port: 0, enabled: true, ..Default::default() }).enabled = true;
+        }
+    } else if fresh {
         for name in ["postgres", "redis", "mailpit"] {
+            if services::available(name).is_err() { continue; }
             cfg.services.insert(name.into(), ServiceConfig { version: services::info(name)?.version.into(), port: 0, enabled: true, ..Default::default() });
         }
     }
     let all = rest.contains(&"--all");
+    let every_php = || php::available_minors().iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let mut want_php: Vec<String> = vec![cfg.default_php.clone()];
-    if let Some(i) = rest.iter().position(|a| *a == "--php") {
-        if let Some(list) = rest.get(i + 1) {
-            want_php = if *list == "all" { php::MINORS.iter().map(|s| s.to_string()).collect() } else { list.split(',').map(php::normalize).collect::<R<Vec<_>>>()? };
-        }
+    if let Some(list) = flag("--php") {
+        want_php = if list == "all" { every_php() } else { list.split(',').map(php::normalize).collect::<R<Vec<_>>>()? };
     }
     if all {
-        want_php = php::MINORS.iter().map(|s| s.to_string()).collect();
-        for i in services::CATALOG {
-            cfg.services.entry(i.name.into()).or_insert(ServiceConfig { version: i.version.into(), port: 0, enabled: true, ..Default::default() });
+        want_php = every_php();
+        if picked.is_none() {
+            for i in services::CATALOG {
+                if services::available(i.name).is_err() { continue; }
+                cfg.services.entry(i.name.into()).or_insert(ServiceConfig { version: i.version.into(), port: 0, enabled: true, ..Default::default() });
+            }
         }
     }
     for p in &cfg.parked { let _ = std::fs::create_dir_all(p); }
@@ -319,7 +360,8 @@ fn start_opts(quiet: bool) -> R<()> {
     }
     paths::ensure_dirs()?;
     let me = std::env::current_exe()?;
-    if !same_file(&me, &paths::bin().join("tez.exe")) && paths::bin().join("tez.exe").exists() {
+    let installed = paths::bin().join(sys::exe("tez"));
+    if !same_file(&me, &installed) && installed.exists() {
         // Running a newer build from elsewhere (cargo run): refresh the installed copy first.
         install_binaries()?;
     }
@@ -390,21 +432,20 @@ const APP_INSTANCE_PORT: u16 = 7978;
 
 /// Start the desktop app (tray icon). With `show`, bring its window forward.
 fn launch_app(show: bool) -> bool {
-    let app = paths::bin().join("tez-app.exe");
+    let app = paths::bin().join(sys::exe("tez-app"));
     if !app.exists() { return false; }
+    // No display (a server, CI): there is no tray to show.
+    if cfg!(target_os = "linux") && std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() { return false; }
     let running = !util::port_free(APP_INSTANCE_PORT);
     if running {
         // Any connection to the app's instance port asks it to show its window.
         if show { let _ = std::net::TcpStream::connect(("127.0.0.1", APP_INSTANCE_PORT)); }
         return true;
     }
-    use std::os::windows::process::CommandExt;
-    win::stop_std_inheritance();
     let mut cmd = std::process::Command::new(&app);
     if !show { cmd.arg("--background"); }
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let flags = win::DETACHED_PROCESS | win::CREATE_NEW_PROCESS_GROUP;
-    cmd.creation_flags(flags | win::CREATE_BREAKAWAY_FROM_JOB).spawn().or_else(|_| cmd.creation_flags(flags).spawn()).is_ok()
+    sys::spawn_detached(&mut cmd).is_ok()
 }
 
 fn open_dashboard() -> R<()> {
@@ -412,10 +453,10 @@ fn open_dashboard() -> R<()> {
     if launch_app(true) { return Ok(()); }
     let url = format!("http://127.0.0.1:{}", Config::load().api_port);
     let edge = PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe");
-    if edge.exists() {
+    if cfg!(windows) && edge.exists() {
         std::process::Command::new(edge).arg(format!("--app={url}")).spawn()?;
     } else {
-        std::process::Command::new("cmd.exe").args(["/c", "start", "", &url]).spawn()?;
+        sys::open_url(&url)?;
     }
     Ok(())
 }
@@ -434,6 +475,7 @@ fn php_list() -> R<()> {
         let state = match &inst {
             Some(v) if !latest.is_empty() && v != &latest => yellow(&format!("{v} installed, {latest} available")),
             Some(v) => green(&format!("{v} installed")),
+            None if !php::available_minors().contains(minor) => dim(&format!("no {} build", sys::os())),
             None => dim(&format!("{latest} available")),
         };
         let embedded = if *minor == web::EMBEDDED_PHP && web::frankenphp_exe().exists() { dim("  + embedded in FrankenPHP") } else { String::new() };
@@ -444,7 +486,7 @@ fn php_list() -> R<()> {
 
 fn php_install(vs: &[&str]) -> R<()> {
     let cfg = Config::load();
-    let list: Vec<String> = if vs.is_empty() || vs == ["all"] { php::MINORS.iter().map(|s| s.to_string()).collect() } else { vs.iter().map(|v| php::normalize(v)).collect::<R<_>>()? };
+    let list: Vec<String> = if vs.is_empty() || vs == ["all"] { php::available_minors().iter().map(|s| s.to_string()).collect() } else { vs.iter().map(|v| php::normalize(v)).collect::<R<_>>()? };
     for v in list { php::install(&v, &cfg)?; }
     reload_if_running()
 }
@@ -628,7 +670,8 @@ fn services_list() -> R<()> {
         let installed = services::is_installed(i.name, &version);
         let enabled = sc.map(|s| s.enabled).unwrap_or(false);
         let port = sc.map(|s| s.port).filter(|p| *p > 0).unwrap_or(i.port);
-        let state = if installed && enabled { green("enabled") } else if installed { yellow("installed, disabled") } else { dim("not installed") };
+        let state = if installed && enabled { green("enabled") } else if installed { yellow("installed, disabled") }
+            else if services::available(i.name).is_err() { dim(&format!("no {} build", sys::os())) } else { dim("not installed") };
         println!("  {:<12} {:<9} {:<22} :{port:<6} {}", i.name, version, state, dim(i.about));
     }
     Ok(())
@@ -670,7 +713,7 @@ fn service_update(name: &str) -> R<()> {
     let mut cfg = Config::load();
     let sc = cfg.services.get(name).cloned().unwrap_or_default();
     let latest = match name {
-        "redis" => fetch::github_latest_tag("redis-windows/redis-windows")?,
+        "redis" => fetch::github_latest_tag(if cfg!(windows) { "redis-windows/redis-windows" } else { "redis/redis" })?,
         "mailpit" => fetch::github_latest_tag("axllent/mailpit")?,
         "meilisearch" => fetch::github_latest_tag("meilisearch/meilisearch")?,
         "rustfs" => fetch::github_latest_tag("rustfs/rustfs")?,
@@ -716,10 +759,10 @@ fn db_import(file: &str, db: &str) -> R<()> {
     services::ensure_database(&cfg, db, "", "")?;
     let custom = !file.ends_with(".sql");
     let status = if custom {
-        std::process::Command::new(pg_bin(&cfg, "pg_restore.exe"))
+        std::process::Command::new(pg_bin(&cfg, &sys::exe("pg_restore")))
             .args(["-h", "127.0.0.1", "-p", &pg_port(&cfg), "-U", "postgres", "-d", db, "--no-owner", "--no-acl", file]).status()?
     } else {
-        std::process::Command::new(pg_bin(&cfg, "psql.exe"))
+        std::process::Command::new(pg_bin(&cfg, &sys::exe("psql")))
             .args(["-h", "127.0.0.1", "-p", &pg_port(&cfg), "-U", "postgres", "-d", db, "-f", file]).status()?
     };
     if !status.success() { util::warn("the import reported errors (often harmless: roles or extensions that already exist)"); }
@@ -809,7 +852,7 @@ fn setup(dir: &Path) -> R<()> {
     };
     crate::import::ensure_laravel_dirs(&site.path);
     if site.path.join("composer.json").exists() {
-        run("composer install", &paths::bin().join("composer.exe"), &["install", "--no-interaction", "--no-progress"]);
+        run("composer install", &paths::bin().join(sys::exe("composer")), &["install", "--no-interaction", "--no-progress"]);
     }
     if site.laravel {
         let env = site.path.join(".env");
@@ -828,7 +871,8 @@ fn setup(dir: &Path) -> R<()> {
         }
     }
     if site.path.join("package.json").exists() {
-        if let Some(npm) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join("npm.cmd")).find(|p| p.exists()) {
+        let npm_name = if cfg!(windows) { "npm.cmd" } else { "npm" };
+        if let Some(npm) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(npm_name)).find(|p| p.exists()) {
             run("npm install", &npm, &["install", "--no-audit", "--no-fund"]);
         } else { util::warn("Node.js is not installed; skipping npm install"); }
     }
@@ -878,7 +922,11 @@ fn logs(name: &str, rest: &[&str]) -> R<()> {
 
 // ---------------------------------------------------------------- trust, hosts, doctor
 
-fn hosts_file() -> PathBuf { paths::system32("drivers").join("etc").join("hosts") }
+fn hosts_file() -> PathBuf {
+    if cfg!(windows) { paths::system32("drivers").join("etc").join("hosts") } else { PathBuf::from("/etc/hosts") }
+}
+
+fn admin_word() -> &'static str { if cfg!(windows) { "one admin prompt" } else { "asks for your password once (sudo)" } }
 
 fn wanted_hosts(cfg: &Config) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
@@ -919,44 +967,71 @@ fn missing_hosts(cfg: &Config) -> Vec<String> {
 fn hosts_hint(cfg: &Config) {
     let missing = missing_hosts(cfg);
     if !missing.is_empty() {
-        util::warn(&format!("{} not in the hosts file yet: run `tez hosts` (one admin prompt). Until then use https://<site>.localhost", missing.join(", ")));
+        util::warn(&format!("{} not in the hosts file yet: run `tez hosts` ({}). Until then use https://<site>.localhost", missing.join(", "), admin_word()));
     }
 }
 
 fn write_hosts_block(cfg: &Config) -> R<()> {
     let path = hosts_file();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let nl = sys::NL;
     let mut out = String::new();
     let mut skipping = false;
     for line in text.lines() {
         if line.trim() == "# tez-begin" { skipping = true; continue; }
         if line.trim() == "# tez-end" { skipping = false; continue; }
-        if !skipping { out.push_str(line); out.push_str("\r\n"); }
+        if !skipping { out.push_str(line); out.push_str(nl); }
     }
     let others: String = out.to_ascii_lowercase();
-    let mut block = String::from("# tez-begin\r\n");
+    let mut block = format!("# tez-begin{nl}");
     for h in wanted_hosts(cfg) {
         let already = others.lines().filter(|l| !l.trim_start().starts_with('#')).any(|l| l.split_whitespace().skip(1).any(|x| x == h));
-        if !already { block.push_str(&format!("127.0.0.1 {h}\r\n")); }
+        if !already { block.push_str(&format!("127.0.0.1 {h}{nl}")); }
     }
-    block.push_str("# tez-end\r\n");
+    block.push_str(&format!("# tez-end{nl}"));
     let trimmed = out.trim_end().to_string();
-    std::fs::write(&path, format!("{trimmed}\r\n{block}"))?;
+    std::fs::write(&path, format!("{trimmed}{nl}{block}"))?;
     Ok(())
 }
 
 fn hosts(elevated: bool) -> R<()> {
     let cfg = Config::load();
     if missing_hosts(&cfg).is_empty() && !elevated { util::ok("hosts file already has every site"); return Ok(()); }
-    if win::is_elevated() {
+    if sys::is_elevated() {
         write_hosts_block(&cfg)?;
         util::ok("hosts file updated");
         return Ok(());
     }
-    util::step("Asking Windows for permission to edit the hosts file");
-    let code = win::run_elevated(&paths::bin().join("tez.exe"), &["hosts".into(), "--elevated".into()])?;
+    util::step(if cfg!(windows) { "Asking Windows for permission to edit the hosts file" } else { "Editing /etc/hosts needs root: sudo asks for your password" });
+    let code = sys::run_elevated(&paths::bin().join(sys::exe("tez")), &["hosts".into(), "--elevated".into()])?;
     if code != 0 { bail!("the hosts file was not changed"); }
     util::ok("hosts file updated");
+    Ok(())
+}
+
+/// Add tez's root certificate to the system's trust store (runs as root / elevated).
+fn trust_root(root: &Path) -> R<()> {
+    if cfg!(windows) {
+        let st = std::process::Command::new(paths::system32("certutil.exe")).args(["-addstore", "-f", "Root"]).arg(root).output()?;
+        if !st.status.success() { bail!("certutil could not add the certificate: {}", String::from_utf8_lossy(&st.stdout)); }
+    } else if cfg!(target_os = "macos") {
+        let st = std::process::Command::new("security")
+            .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain"]).arg(root).output()?;
+        if !st.status.success() { bail!("security could not add the certificate: {}", String::from_utf8_lossy(&st.stderr)); }
+    } else {
+        // Debian/Ubuntu first, then Fedora/RHEL; whichever layout this system has.
+        let mut done = false;
+        for (file, tool) in crate::manage::LINUX_CA_FILES {
+            let p = Path::new(file);
+            if !p.parent().map(|d| d.exists()).unwrap_or(false) { continue; }
+            std::fs::copy(root, p)?;
+            let st = std::process::Command::new(tool).output()?;
+            if !st.status.success() { bail!("{tool} failed: {}", String::from_utf8_lossy(&st.stderr)); }
+            done = true;
+            break;
+        }
+        if !done { bail!("no system certificate folder found (expected /usr/local/share/ca-certificates or /etc/pki/ca-trust/source/anchors)"); }
+    }
     Ok(())
 }
 
@@ -968,25 +1043,52 @@ fn trust(rest: &[&str]) -> R<()> {
         for _ in 0..40 { if root.exists() { break; } std::thread::sleep(Duration::from_millis(250)); }
         if !root.exists() { bail!("the local certificate authority was not created yet; open https://tez.localhost once and retry"); }
     }
-    if rest.contains(&"--elevated") || win::is_elevated() {
-        let st = std::process::Command::new(paths::system32("certutil.exe")).args(["-addstore", "-f", "Root"]).arg(&root).output()?;
-        if !st.status.success() { bail!("certutil could not add the certificate: {}", String::from_utf8_lossy(&st.stdout)); }
+    if rest.contains(&"--elevated") || sys::is_elevated() {
+        trust_root(&root)?;
         write_hosts_block(&cfg)?;
         return Ok(());
     }
-    util::step("Asking Windows for permission to trust tez's local HTTPS certificate and update the hosts file");
-    let code = win::run_elevated(&paths::bin().join("tez.exe"), &["trust".into(), "--elevated".into()])?;
+    util::step(if cfg!(windows) { "Asking Windows for permission to trust tez's local HTTPS certificate and update the hosts file" }
+        else { "Trusting tez's local HTTPS certificate and updating /etc/hosts needs root: sudo asks for your password" });
+    let code = sys::run_elevated(&paths::bin().join(sys::exe("tez")), &["trust".into(), "--elevated".into()])?;
     if code != 0 { bail!("trust was not completed (the prompt was declined?)"); }
     install_cacert()?;
     php::write_all_inis(&cfg)?;
-    util::ok("HTTPS for every site is trusted by Windows, Edge and Chrome; PHP trusts it too");
+    let who = match sys::os() { "windows" => "Windows, Edge and Chrome", "macos" => "macOS, Safari and Chrome", _ => "the system (curl, Chrome after a restart)" };
+    util::ok(&format!("HTTPS for every site is trusted by {who}; PHP trusts it too"));
     println!("  {}", dim(&format!("Firefox: set security.enterprise_roots.enabled = true. Node: NODE_EXTRA_CA_CERTS={}", root.display())));
+    Ok(())
+}
+
+/// `tez doctor` on macOS and Linux: disk, ports, PATH and build tools.
+fn doctor_unix(cfg: &Config) -> R<()> {
+    let free = sys::free_bytes(&paths::home());
+    if free < 10 << 30 { util::warn(&format!("{} free on the disk holding {}", util::human_bytes(free), paths::home().display())); }
+    else { util::ok(&format!("{} free", util::human_bytes(free))); }
+    for (port, what) in [(cfg.http_port, "HTTP"), (cfg.https_port, "HTTPS")] {
+        if !util::port_free(port) && !(api::running() && util::port_open(2019)) {
+            let why = if port < 1024 && cfg!(target_os = "linux") && !sys::is_elevated() { "needs root on Linux" } else { "is in use" };
+            util::warn(&format!("port {port} ({what}) {why}; tez uses {} instead", if what == "HTTP" { 8088 } else { 8443 }));
+        }
+    }
+    let php = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join("php")).find(|p| p.exists());
+    match php {
+        Some(p) if p.starts_with(paths::bin()) => util::ok("`php` is tez's php"),
+        Some(p) => util::warn(&format!("`php` resolves to {}. Put {} first in PATH (open a new terminal after `tez install`).", p.display(), paths::bin().display())),
+        None => util::warn(&format!("`php` is not on PATH yet; open a new terminal after `tez install` (or add {})", paths::bin().display())),
+    }
+    if let Err(e) = services::available("redis") { util::warn(&e); }
     Ok(())
 }
 
 fn doctor(rest: &[&str]) -> R<()> {
     let cfg = Config::load();
     println!("{}", bold("tez doctor"));
+    if !cfg!(windows) {
+        doctor_unix(&cfg)?;
+        if rest.contains(&"--fix") { util::ok("nothing to fix automatically on this OS"); }
+        return Ok(());
+    }
     // Disk space.
     let out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", "(Get-PSDrive C).Free"])
@@ -1035,7 +1137,7 @@ fn doctor(rest: &[&str]) -> R<()> {
         let list = dirs.iter().map(|d| format!("'{}'", d.replace('\'', "''"))).collect::<Vec<_>>().join(",");
         let script = format!("Add-MpPreference -ExclusionPath @({list})");
         util::step("Adding Defender exclusions for tez and your sites (admin prompt)");
-        let code = win::run_elevated(Path::new("powershell.exe"), &["-NoProfile".into(), "-Command".into(), script])?;
+        let code = sys::run_elevated(Path::new("powershell.exe"), &["-NoProfile".into(), "-Command".into(), script])?;
         if code == 0 { util::ok("Defender no longer scans tez or your site folders"); } else { util::warn("Defender exclusions were not added"); }
     }
     Ok(())

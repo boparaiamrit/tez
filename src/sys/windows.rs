@@ -4,11 +4,12 @@
 //! stopped, crashes or is killed, Windows ends every child and grandchild with it, so nothing
 //! is ever left running behind (php-cgi, postgres backends, node, horizon workers).
 
-#![allow(non_snake_case, clippy::upper_case_acronyms)]
+#![allow(non_snake_case, clippy::upper_case_acronyms, dead_code)]
 
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
-use std::process::Child;
+use std::os::windows::process::CommandExt;
+use std::process::{Child, Command};
 
 pub type HANDLE = *mut c_void;
 
@@ -138,6 +139,13 @@ impl Job {
         }
     }
 
+    /// A new job holding `child` (and, from then on, everything it starts).
+    pub fn attach(child: &Child) -> Option<Job> {
+        let job = Job::new()?;
+        job.assign(child);
+        Some(job)
+    }
+
     pub fn assign(&self, child: &Child) -> bool {
         // SAFETY: the child's handle stays valid while `child` is alive, which it is here.
         unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) != 0 }
@@ -230,3 +238,33 @@ pub fn is_elevated() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+// ------------------------------------------------------------------ the API every OS provides
+
+/// Set up a managed child before it starts: no console window.
+pub fn prepare_child(cmd: &mut Command) { cmd.creation_flags(CREATE_NO_WINDOW); }
+
+/// End a managed process and everything it started (its job). The caller has already asked it
+/// to stop nicely (the spec's stop command) where it has one.
+pub fn kill_tree(job: Option<Job>, child: Option<Child>) {
+    if let Some(job) = job { job.terminate(); }
+    if let Some(mut child) = child { let _ = child.kill(); let _ = child.wait(); }
+}
+
+/// Start a program that outlives this one (the daemon, the tray app), detached from the console
+/// and, where allowed, from the terminal's job so closing the terminal keeps it running.
+pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<Child> {
+    stop_std_inheritance();
+    let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    cmd.creation_flags(base | CREATE_BREAKAWAY_FROM_JOB).spawn().or_else(|_| cmd.creation_flags(base).spawn())
+}
+
+/// Open a URL in the default browser.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    Command::new(crate::paths::system32("cmd.exe")).args(["/c", "start", "", url]).creation_flags(CREATE_NO_WINDOW).spawn().map(|_| ())
+}
+
+/// Job Objects already end every child when tez exits, however it exits.
+pub fn on_shutdown_signal(_f: fn()) {}
+pub fn remember_groups(_procs: &[u32]) {}
+pub fn kill_stale_groups() {}

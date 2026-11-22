@@ -97,6 +97,7 @@ pub fn for_dir(cfg: &Config, dir: &Path) -> Option<Site> {
     let dir = paths::absolute(dir);
     let d = dir.to_string_lossy().to_ascii_lowercase();
     all(cfg).into_iter().filter(|s| {
+        if !cfg!(windows) { return dir.starts_with(paths::absolute(&s.path)); }
         let p = paths::absolute(&s.path).to_string_lossy().to_ascii_lowercase();
         d == p || d.starts_with(&format!("{p}\\"))
     }).max_by_key(|s| s.path.as_os_str().len())

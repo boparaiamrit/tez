@@ -91,8 +91,10 @@ pub fn write_env_keys(path: &Path, updates: &[(&str, String)]) -> R<()> {
         }
         if !found { lines.push(format!("{key}={quoted}")); }
     }
-    let mut out = lines.join("\r\n");
-    out.push_str("\r\n");
+    // Keep the file's own line endings; new files get the OS's.
+    let nl = if text.contains("\r\n") { "\r\n" } else if text.contains('\n') { "\n" } else { crate::sys::NL };
+    let mut out = lines.join(nl);
+    out.push_str(nl);
     std::fs::write(path, out)?;
     Ok(())
 }
@@ -154,6 +156,11 @@ mod tests {
         assert_eq!(cmp_version("17.12", "17.12.0"), std::cmp::Ordering::Equal);
         assert!(is_prerelease("6.0.0RC1"));
         assert!(!is_prerelease("6.3.0"));
+    }
+    #[test]
+    fn relative_paths_join_per_os() {
+        let p = crate::paths::join_rel(Path::new("base"), "storage/framework/cache");
+        assert_eq!(p, Path::new("base").join("storage").join("framework").join("cache"));
     }
     #[test]
     fn labels_are_hostname_safe() {

@@ -19,16 +19,23 @@ const SKIP_FILES: &[&str] = &["hot", "config.php", "routes-v7.php", "packages.ph
 const BIG: u64 = 1 << 30;
 
 fn source_path(src: &str, distro: &str) -> PathBuf {
-    // A Linux path (/home/me/code/app) means a folder inside the WSL distro.
-    if src.starts_with('/') {
+    // On Windows a Linux path (/home/me/code/app) means a folder inside the WSL distro.
+    if cfg!(windows) && src.starts_with('/') {
         PathBuf::from(format!(r"\\wsl.localhost\{distro}{}", src.replace('/', "\\")))
-    } else {
+    } else if cfg!(windows) {
         PathBuf::from(src)
+    } else {
+        paths::absolute(Path::new(src))
     }
 }
 
-/// Total bytes under a directory, via robocopy's list mode (fast over \\wsl.localhost).
+/// Total bytes under a directory: robocopy's list mode on Windows (fast over \\wsl.localhost),
+/// `du -sk` elsewhere.
 fn measure(dir: &Path) -> u64 {
+    if !cfg!(windows) {
+        let out = Command::new("du").arg("-sk").arg(dir).output();
+        return out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().and_then(|n| n.parse::<u64>().ok())).map(|kb| kb * 1024).unwrap_or(0);
+    }
     let out = Command::new("robocopy")
         .arg(dir).arg(r"C:\__tez_nowhere__")
         .args(["/L", "/E", "/XJ", "/NJH", "/NFL", "/NDL", "/NP", "/BYTES", "/R:0", "/W:0"])
@@ -51,8 +58,33 @@ fn top_files_size(dir: &Path) -> u64 {
 pub fn ensure_laravel_dirs(project: &Path) {
     if !project.join("artisan").exists() { return; }
     for d in ["storage/logs", "storage/framework/cache/data", "storage/framework/sessions", "storage/framework/views", "storage/framework/testing", "bootstrap/cache"] {
-        let _ = std::fs::create_dir_all(project.join(d.replace('/', "\\")));
+        let _ = std::fs::create_dir_all(paths::join_rel(project, d));
     }
+}
+
+/// Copy a tree, leaving out `skip_dirs` (absolute) and files named in `skip_files`. Symlinks are
+/// copied as links, never followed. (macOS and Linux; Windows uses robocopy.)
+#[cfg(unix)]
+fn copy_filtered(src: &Path, dest: &Path, skip_dirs: &[PathBuf], skip_files: &[&str]) -> R<u64> {
+    std::fs::create_dir_all(dest)?;
+    let mut copied = 0;
+    for e in std::fs::read_dir(src)?.flatten() {
+        let p = e.path();
+        let to = dest.join(e.file_name());
+        let ft = e.file_type()?;
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&p)?;
+            let _ = std::fs::remove_file(&to);
+            std::os::unix::fs::symlink(target, &to)?;
+        } else if ft.is_dir() {
+            if skip_dirs.iter().any(|d| d == &p) { continue; }
+            copied += copy_filtered(&p, &to, skip_dirs, skip_files)?;
+        } else {
+            if skip_files.iter().any(|f| e.file_name() == *f) { continue; }
+            copied += std::fs::copy(&p, &to)?;
+        }
+    }
+    Ok(copied)
 }
 
 pub fn run(args: &[&str]) -> R<()> {
@@ -73,7 +105,7 @@ pub fn run(args: &[&str]) -> R<()> {
     let src = source_path(src_arg, &distro);
     if !src.is_dir() { bail!("{} is not a folder I can read", src.display()); }
     let cfg = Config::load();
-    let parked = cfg.parked.first().cloned().unwrap_or_else(|| format!("{}\\Sites", std::env::var("USERPROFILE").unwrap_or_default()));
+    let parked = cfg.parked.first().cloned().unwrap_or_else(|| paths::user_home().join("Sites").display().to_string());
     let folder = name.unwrap_or_else(|| src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "site".into()));
     let dest = PathBuf::from(&parked).join(&folder);
     if dest.join("artisan").exists() || dest.join("composer.json").exists() {
@@ -102,7 +134,7 @@ pub fn run(args: &[&str]) -> R<()> {
         }
         total += size;
     }
-    for sub in SKIP_SUBDIRS { excluded_dirs.push(src.join(sub.replace('/', "\\"))); }
+    for sub in SKIP_SUBDIRS { excluded_dirs.push(paths::join_rel(&src, sub)); }
     for (n, size, why) in &skipped {
         println!("  {} {:<16} {}", dim("skip"), n, dim(&format!("{}{why}", if *size > 0 { format!("{}  ", util::human_bytes(*size)) } else { String::new() })));
     }
@@ -110,22 +142,30 @@ pub fn run(args: &[&str]) -> R<()> {
     fetch::ensure_space(Path::new(&parked), total)?;
 
     util::step(&format!("Copying to {}", dest.display()));
-    let mut cmd = Command::new("robocopy");
-    cmd.arg(&src).arg(&dest).args(["/E", "/XJ", "/MT:32", "/R:1", "/W:1", "/NFL", "/NDL", "/NP", "/NJH"]);
-    cmd.arg("/XD");
-    for d in &excluded_dirs { cmd.arg(d); }
-    cmd.arg("/XF");
-    for f in SKIP_FILES { cmd.arg(f); }
-    let status = cmd.status()?;
-    // robocopy: 0-7 are success codes (files copied, extras, mismatches), 8+ means failures.
-    if status.code().unwrap_or(16) >= 8 { bail!("the copy did not finish cleanly (robocopy code {})", status.code().unwrap_or(-1)); }
+    #[cfg(unix)]
+    {
+        let bytes = copy_filtered(&src, &dest, &excluded_dirs, SKIP_FILES)?;
+        util::ok(&format!("copied {}", util::human_bytes(bytes)));
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("robocopy");
+        cmd.arg(&src).arg(&dest).args(["/E", "/XJ", "/MT:32", "/R:1", "/W:1", "/NFL", "/NDL", "/NP", "/NJH"]);
+        cmd.arg("/XD");
+        for d in &excluded_dirs { cmd.arg(d); }
+        cmd.arg("/XF");
+        for f in SKIP_FILES { cmd.arg(f); }
+        let status = cmd.status()?;
+        // robocopy: 0-7 are success codes (files copied, extras, mismatches), 8+ means failures.
+        if status.code().unwrap_or(16) >= 8 { bail!("the copy did not finish cleanly (robocopy code {})", status.code().unwrap_or(-1)); }
+    }
     // The skipped cache and log folders must exist (empty), or Laravel refuses to boot.
     ensure_laravel_dirs(&dest);
     util::ok(&format!("{folder} is at {} and served at https://{}.{}", dest.display(), util::host_label(&folder), cfg.tld));
     println!("  next, in that folder:");
     println!("    {}   point .env at tez's services and create the database", bold("tez adopt"));
-    println!("    {}   PHP packages for Windows", bold("composer install"));
-    println!("    {}   JavaScript packages for Windows", bold("npm install"));
+    println!("    {}   PHP packages for this OS", bold("composer install"));
+    println!("    {}   JavaScript packages for this OS", bold("npm install"));
     println!("    {}   tables", bold("php artisan migrate"));
     println!("    {}   Horizon, Reverb, Vite", bold("tez up"));
     Ok(())

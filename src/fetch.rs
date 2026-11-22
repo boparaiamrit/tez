@@ -1,5 +1,6 @@
-//! Downloading and unpacking, with the curl.exe and tar.exe (bsdtar) that ship inside Windows.
-//! No HTTP or archive libraries are compiled into tez.
+//! Downloading and unpacking with the system's own curl and tar: the copies inside Windows
+//! (curl.exe, bsdtar), or curl, tar and unzip on macOS and Linux. No HTTP or archive libraries
+//! are compiled into tez.
 
 use crate::paths;
 use crate::util::R;
@@ -10,12 +11,28 @@ use std::process::{Command, Stdio};
 
 const UA: &str = "tez/0.1 (+https://github.com/boparaiamrit/tez)";
 
+fn curl() -> Command {
+    let mut c = Command::new(paths::tool("curl"));
+    c.stdin(Stdio::null());
+    c
+}
+
+/// GitHub's API allows 60 anonymous calls an hour; CI runners and gh users have a token.
+fn github_auth(cmd: &mut Command, url: &str) {
+    if !url.starts_with("https://api.github.com/") { return; }
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(t) = std::env::var(var) {
+            if !t.trim().is_empty() { cmd.arg("-H").arg(format!("Authorization: Bearer {}", t.trim())); return; }
+        }
+    }
+}
+
 /// GET a URL and return the body as text.
 pub fn get_text(url: &str) -> R<String> {
-    let out = Command::new(paths::system32("curl.exe"))
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-A", UA, url])
-        .stdin(Stdio::null())
-        .output()?;
+    let mut cmd = curl();
+    cmd.args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-A", UA]);
+    github_auth(&mut cmd, url);
+    let out = cmd.arg(url).output()?;
     if !out.status.success() {
         bail!("download failed ({}): {url}", out.status.code().unwrap_or(-1));
     }
@@ -24,9 +41,9 @@ pub fn get_text(url: &str) -> R<String> {
 
 /// True when the URL answers 200 to a HEAD request (after redirects).
 pub fn exists(url: &str) -> bool {
-    Command::new(paths::system32("curl.exe"))
-        .args(["-fsIL", "-o", "NUL", "--connect-timeout", "10", "-A", UA, url])
-        .stdin(Stdio::null())
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    curl()
+        .args(["-fsIL", "-o", null, "--connect-timeout", "10", "-A", UA, url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -34,11 +51,11 @@ pub fn exists(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Never let tez fill the disk: Windows, WSL and databases misbehave when C: hits zero.
+/// Never let tez fill the disk: the OS, WSL and databases misbehave when the disk hits zero.
 pub const MIN_FREE: u64 = 2 << 30;
 
 pub fn ensure_space(near: &Path, need: u64) -> R<()> {
-    let free = crate::win::free_bytes(near);
+    let free = crate::sys::free_bytes(near);
     if free < need.saturating_add(MIN_FREE) {
         bail!(
             "not enough disk space: {} free on the drive holding {}, and this needs about {} plus 2 GB to spare",
@@ -57,10 +74,10 @@ pub fn download(url: &str, file_name: &str) -> R<PathBuf> {
     ensure_space(&paths::cache_dir(), 0)?;
     std::fs::create_dir_all(paths::cache_dir())?;
     let part = dest.with_extension("part");
-    let mut cmd = Command::new(paths::system32("curl.exe"));
+    let mut cmd = curl();
     cmd.args(["-fL", "--retry", "3", "--connect-timeout", "20", "-A", UA, "-o"]).arg(&part).arg(url);
     if std::io::stderr().is_terminal() { cmd.arg("-#"); } else { cmd.arg("-s"); }
-    let status = cmd.stdin(Stdio::null()).status()?;
+    let status = cmd.status()?;
     if !status.success() {
         let _ = std::fs::remove_file(&part);
         bail!("download failed: {url}");
@@ -69,13 +86,21 @@ pub fn download(url: &str, file_name: &str) -> R<PathBuf> {
     Ok(dest)
 }
 
-/// SHA-256 of a file, with Windows' certutil.
+/// SHA-256 of a file: certutil on Windows, shasum on macOS, sha256sum on Linux.
 pub fn sha256(path: &Path) -> R<String> {
-    let out = Command::new(paths::system32("certutil.exe")).arg("-hashfile").arg(path).arg("SHA256").output()?;
+    let out = if cfg!(windows) {
+        Command::new(paths::tool("certutil")).arg("-hashfile").arg(path).arg("SHA256").output()?
+    } else if cfg!(target_os = "macos") {
+        Command::new("shasum").args(["-a", "256"]).arg(path).output()?
+    } else {
+        Command::new("sha256sum").arg(path).output()?
+    };
     let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines().skip(1) {
-        let h: String = line.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-        if h.len() == 64 { return Ok(h.to_ascii_lowercase()); }
+    // certutil prints a header line first; shasum/sha256sum print "<hash>  <file>".
+    for line in text.lines().skip(if cfg!(windows) { 1 } else { 0 }) {
+        let first = line.split_whitespace().next().unwrap_or_default();
+        let h: String = if cfg!(windows) { line.chars().filter(|c| c.is_ascii_hexdigit()).collect() } else { first.to_string() };
+        if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) { return Ok(h.to_ascii_lowercase()); }
     }
     bail!("could not hash {}", path.display())
 }
@@ -89,16 +114,27 @@ pub fn verify_sha256(path: &Path, expected: &str) -> R<()> {
     Ok(())
 }
 
-/// Unpack an archive (zip, tar, txz, ...) into `dest` with bsdtar. `excludes` are tar patterns.
+/// Unpack an archive (zip, tar, tgz, txz, ...) into `dest`. `excludes` are tar patterns.
+/// Windows' bsdtar reads zips too; on macOS and Linux zips go through unzip.
 pub fn extract(archive: &Path, dest: &Path, excludes: &[&str]) -> R<()> {
     // Unpacked archives are usually 2 to 4 times their compressed size.
     let size = archive.metadata().map(|m| m.len()).unwrap_or(0);
     ensure_space(dest, size.saturating_mul(3))?;
     std::fs::create_dir_all(dest)?;
-    let mut cmd = Command::new(paths::system32("tar.exe"));
-    cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
-    for e in excludes { cmd.arg("--exclude").arg(e); }
-    let out = cmd.stdin(Stdio::null()).output()?;
+    let is_zip = archive.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false);
+    let mut cmd = if is_zip && !cfg!(windows) {
+        let mut c = Command::new("unzip");
+        c.arg("-q").arg("-o").arg(archive).arg("-d").arg(dest);
+        if !excludes.is_empty() { c.arg("-x").args(excludes); }
+        c
+    } else {
+        let mut c = Command::new(paths::tool("tar"));
+        c.arg("-xf").arg(archive).arg("-C").arg(dest);
+        for e in excludes { c.arg("--exclude").arg(e); }
+        c
+    };
+    let out = cmd.stdin(Stdio::null()).output()
+        .map_err(|e| format!("could not run {} to unpack {}: {e}", if is_zip && !cfg!(windows) { "unzip" } else { "tar" }, archive.display()))?;
     if !out.status.success() {
         bail!("could not unpack {}: {}", archive.display(), String::from_utf8_lossy(&out.stderr));
     }
@@ -119,6 +155,17 @@ pub fn extract_flat(archive: &Path, dest: &Path, excludes: &[&str]) -> R<()> {
     Ok(())
 }
 
+/// Make a downloaded program runnable (macOS and Linux; nothing to do on Windows).
+pub fn make_executable(path: &Path) -> R<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let _ = path;
+    Ok(())
+}
+
 /// Every `href="..."` target in an HTML directory listing.
 pub fn hrefs(html: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -133,7 +180,7 @@ pub fn hrefs(html: &str) -> Vec<String> {
     out
 }
 
-/// Latest release tag of a GitHub repository (unauthenticated API).
+/// Latest release tag of a GitHub repository.
 pub fn github_latest_tag(repo: &str) -> R<String> {
     let body = get_text(&format!("https://api.github.com/repos/{repo}/releases/latest"))?;
     let v: serde_json::Value = serde_json::from_str(&body)?;
@@ -141,6 +188,16 @@ pub fn github_latest_tag(repo: &str) -> R<String> {
         Some(t) => Ok(t.to_string()),
         None => bail!("no release found for {repo}"),
     }
+}
+
+/// Every release tag of a GitHub repository, newest first (one page of 100).
+pub fn github_tags(repo: &str) -> R<Vec<String>> {
+    let body = get_text(&format!("https://api.github.com/repos/{repo}/releases?per_page=100"))?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    Ok(v.as_array().into_iter().flatten()
+        .filter(|r| !r["prerelease"].as_bool().unwrap_or(false) && !r["draft"].as_bool().unwrap_or(false))
+        .filter_map(|r| r["tag_name"].as_str().map(|s| s.to_string()))
+        .collect())
 }
 
 #[cfg(test)]

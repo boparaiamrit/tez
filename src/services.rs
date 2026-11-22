@@ -1,9 +1,10 @@
-//! Services (Herd Pro's "Services"), all native Windows builds bound to 127.0.0.1, data in ~/.tez/data:
+//! Services (Herd Pro's "Services"), all native builds bound to 127.0.0.1, data in ~/.tez/data:
 //!
-//! * PostgreSQL 14 to 18 (EnterpriseDB builds) with TimescaleDB (any version with a Windows build;
-//!   several can sit side by side), PostGIS and pgvector
-//! * MySQL 8.0 / 8.4, MariaDB 10.11 to 13, MongoDB 6 to 8.2
-//! * Redis, Mailpit, Meilisearch, RustFS (S3, in place of MinIO, whose binaries were withdrawn)
+//! * PostgreSQL 14 to 18 (EnterpriseDB builds on Windows, theseus-rs portable builds on macOS
+//!   and Linux), with TimescaleDB (several versions side by side), PostGIS and pgvector on Windows
+//! * MySQL 8.0 / 8.4, MariaDB 10.11 to 13 (Windows and Linux x86_64), MongoDB 6 to 8.2
+//! * Redis (redis-windows builds; compiled from source on macOS and Linux), Mailpit, Meilisearch,
+//!   RustFS (S3, in place of MinIO, whose binaries were withdrawn)
 //!
 //! A service can run several versions at once: the first is named after the service ("postgres"),
 //! more are named `<service>@<version>` ("postgres@16") with their own port and data.
@@ -12,6 +13,7 @@ use crate::config::{Config, ServiceConfig};
 use crate::fetch;
 use crate::paths;
 use crate::spec::Spec;
+use crate::sys;
 use crate::util::{self, R};
 use crate::bail;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,55 @@ pub const PG_EXTENSIONS: &[(&str, &str)] = &[
 /// "postgres@16" -> "postgres".
 pub fn kind(key: &str) -> &str { key.split('@').next().unwrap_or(key) }
 
+/// Whether a service has a build for this OS and CPU; Err says why not.
+pub fn available(key: &str) -> Result<(), String> {
+    let (os, arch) = (sys::os(), sys::arch());
+    let no = |why: &str| Err(format!("{} {why}", info(key).map(|i| i.title).unwrap_or("this service")));
+    match (kind(key), os, arch) {
+        (_, "windows", _) => Ok(()),
+        ("mariadb", "linux", "x86_64") => Ok(()),
+        ("mariadb", _, _) => no("publishes builds for Windows and Linux x86_64 only"),
+        ("rustfs", "macos", "x86_64") => no("has no build for Intel Macs"),
+        ("mongodb", "linux", _) if linux_mongodb_target().is_none() => no("has builds for Ubuntu, Debian, RHEL and Amazon Linux only"),
+        ("redis", _, _) if !has_build_tools() => no("is compiled from source on this OS and needs make and a C compiler (xcode-select --install, or apt install build-essential)"),
+        _ => Ok(()),
+    }
+}
+
+/// PostgreSQL extensions tez can add on this OS.
+pub fn pg_extensions_available() -> bool { cfg!(windows) }
+
+/// make and a C compiler, to build Redis from source (checked once per process).
+fn has_build_tools() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        let ok = |c: &str, a: &str| std::process::Command::new(c).arg(a).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        // On macOS, running make or cc without the Command Line Tools opens an install dialog;
+        // xcode-select -p only asks whether they are there.
+        if cfg!(target_os = "macos") { return ok("xcode-select", "-p"); }
+        // Redis 8 has C++ parts (fast_float), so a C++ compiler too.
+        ok("make", "--version") && (ok("cc", "--version") || ok("gcc", "--version")) && (ok("c++", "--version") || ok("g++", "--version"))
+    })
+}
+
+/// MongoDB's name for this Linux distribution ("ubuntu2404", "debian12", "rhel93"...).
+fn linux_mongodb_target() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| v.trim_matches('"').to_string());
+    let id = get("ID")?;
+    let like = get("ID_LIKE").unwrap_or_default();
+    let ver = get("VERSION_ID").unwrap_or_default();
+    let major = ver.split('.').next().unwrap_or("").to_string();
+    Some(match id.as_str() {
+        "ubuntu" => format!("ubuntu{}", ver.replace('.', "")),
+        "debian" => format!("debian{major}"),
+        "amzn" => format!("amazon{major}"),
+        _ if like.contains("rhel") || like.contains("fedora") || id == "rhel" => match major.as_str() { "8" => "rhel8".into(), "9" => "rhel93".into(), m => format!("rhel{m}") },
+        _ if like.contains("ubuntu") => return None,
+        _ => return None,
+    })
+}
+
 pub fn info(key: &str) -> R<&'static Info> {
     let k = kind(key);
     match CATALOG.iter().find(|i| i.name == k) {
@@ -79,16 +130,17 @@ fn first_existing(d: &Path, names: &[&str]) -> PathBuf {
 
 pub fn exe(name: &str, version: &str) -> PathBuf {
     let d = dir(name, version);
+    let x = sys::exe;
     match kind(name) {
-        "postgres" => d.join("bin").join("postgres.exe"),
-        "mysql" => d.join("bin").join("mysqld.exe"),
-        "mariadb" => first_existing(&d.join("bin"), &["mariadbd.exe", "mysqld.exe"]),
-        "mongodb" => d.join("bin").join("mongod.exe"),
-        "redis" => d.join("redis-server.exe"),
-        "mailpit" => d.join("mailpit.exe"),
-        "meilisearch" => d.join("meilisearch.exe"),
-        "rustfs" => d.join("rustfs.exe"),
-        other => d.join(format!("{other}.exe")),
+        "postgres" => d.join("bin").join(x("postgres")),
+        "mysql" => d.join("bin").join(x("mysqld")),
+        "mariadb" => first_existing(&d.join("bin"), &[x("mariadbd").as_str(), x("mysqld").as_str()]),
+        "mongodb" => d.join("bin").join(x("mongod")),
+        "redis" => d.join(x("redis-server")),
+        "mailpit" => d.join(x("mailpit")),
+        "meilisearch" => d.join(x("meilisearch")),
+        "rustfs" => d.join(x("rustfs")),
+        other => d.join(x(other)),
     }
 }
 
@@ -121,7 +173,29 @@ pub fn free_port(cfg: &Config, base: u16) -> u16 {
 
 fn edb_url(v: &str) -> String { format!("https://get.enterprisedb.com/postgresql/postgresql-{v}-1-windows-x64-binaries.zip") }
 
+/// Portable PostgreSQL builds for macOS and Linux (the ones postgresql_embedded uses).
+const THESEUS: &str = "theseus-rs/postgresql-binaries";
+
+fn theseus_triple() -> &'static str {
+    match (sys::os(), sys::arch()) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", _) => "x86_64-apple-darwin",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => "x86_64-unknown-linux-gnu",
+    }
+}
+
+/// The newest theseus-rs release tag for a major ("17") or a minor ("17.12"): "17.12.0".
+fn theseus_tag(v: &str) -> R<String> {
+    let tags = fetch::github_tags(THESEUS)?;
+    if tags.iter().any(|t| t == v) { return Ok(v.to_string()); }
+    let prefix = format!("{v}.");
+    tags.into_iter().filter(|t| t.starts_with(&prefix)).max_by(|a, b| util::cmp_version(a, b))
+        .ok_or_else(|| format!("no PostgreSQL {v} build for {} at {THESEUS}", theseus_triple()).into())
+}
+
 fn postgres_full_version(v: &str) -> R<String> {
+    if !cfg!(windows) { return theseus_tag(v); }
     if v.contains('.') { return Ok(v.to_string()); }
     let major: u32 = v.parse().map_err(|_| format!("'{v}' is not a PostgreSQL version"))?;
     for minor in (0..=20).rev() {
@@ -135,18 +209,24 @@ fn postgres_full_version(v: &str) -> R<String> {
 fn mongodb_release(series: &str) -> R<(String, String)> {
     let body = fetch::get_text("https://downloads.mongodb.org/full.json")?;
     let json: serde_json::Value = serde_json::from_str(&body)?;
+    // MongoDB's names for this machine: (target, arch, edition).
+    let (target, arch, edition) = match sys::os() {
+        "windows" => ("windows".to_string(), "x86_64", "base"),
+        "macos" => ("macos".to_string(), if sys::arch() == "aarch64" { "arm64" } else { "x86_64" }, "base"),
+        _ => (linux_mongodb_target().ok_or("MongoDB has builds for Ubuntu, Debian, RHEL and Amazon Linux only")?, sys::arch(), "targeted"),
+    };
     let mut best: Option<(String, String)> = None;
     for v in json["versions"].as_array().into_iter().flatten() {
         let ver = v["version"].as_str().unwrap_or_default();
         if !v["production_release"].as_bool().unwrap_or(false) || !ver.starts_with(&format!("{series}.")) { continue; }
         let url = v["downloads"].as_array().into_iter().flatten()
-            .find(|d| d["target"] == "windows" && d["arch"] == "x86_64" && d["edition"] == "base")
+            .find(|d| d["target"] == target.as_str() && d["arch"] == arch && d["edition"] == edition)
             .and_then(|d| d["archive"]["url"].as_str()).map(|s| s.to_string());
         if let Some(url) = url {
             if best.as_ref().map(|(b, _)| util::cmp_version(ver, b) == std::cmp::Ordering::Greater).unwrap_or(true) { best = Some((ver.to_string(), url)); }
         }
     }
-    best.ok_or_else(|| format!("no Windows build of MongoDB {series}").into())
+    best.ok_or_else(|| format!("no {target} {arch} build of MongoDB {series}").into())
 }
 
 /// Newest MariaDB in a series, from MariaDB's download API.
@@ -157,24 +237,91 @@ fn mariadb_release(series: &str) -> R<(String, String)> {
         for (ver, rel) in rels {
             for f in rel["files"].as_array().into_iter().flatten() {
                 let name = f["file_name"].as_str().unwrap_or_default();
-                if name.ends_with("-winx64.zip") {
+                let wanted = if cfg!(windows) { name.ends_with("-winx64.zip") }
+                    else { name.starts_with(&format!("mariadb-{ver}-")) && name.ends_with("-linux-systemd-x86_64.tar.gz") };
+                if wanted {
                     let url = f["file_download_url"].as_str().unwrap_or_default().replace("http://", "https://");
                     return Ok((ver.clone(), url));
                 }
             }
         }
     }
-    bail!("no Windows build of MariaDB {series}")
+    bail!("no {} build of MariaDB {series}", sys::os())
+}
+
+/// MySQL's archive names for a version on this machine (newest macOS first).
+fn mysql_files(ver: &str) -> Vec<String> {
+    match (sys::os(), sys::arch()) {
+        ("windows", _) => vec![format!("mysql-{ver}-winx64.zip")],
+        ("macos", a) => {
+            let a = if a == "aarch64" { "arm64" } else { "x86_64" };
+            ["15", "14", "13"].iter().map(|m| format!("mysql-{ver}-macos{m}-{a}.tar.gz")).collect()
+        }
+        (_, a) => vec![format!("mysql-{ver}-linux-glibc2.28-{a}.tar.xz"), format!("mysql-{ver}-linux-glibc2.17-{a}.tar.xz")],
+    }
 }
 
 /// Newest MySQL patch in a series (dev.mysql.com has no catalog, so probe).
 fn mysql_release(series: &str) -> R<(String, String)> {
     for n in (0..=50).rev() {
         let ver = format!("{series}.{n}");
-        let url = format!("https://dev.mysql.com/get/Downloads/MySQL-{series}/mysql-{ver}-winx64.zip");
-        if fetch::exists(&url) { return Ok((ver, url)); }
+        for file in mysql_files(&ver) {
+            let url = format!("https://dev.mysql.com/get/Downloads/MySQL-{series}/{file}");
+            if fetch::exists(&url) { return Ok((ver, url)); }
+        }
     }
-    bail!("no Windows build of MySQL {series}")
+    bail!("no {} build of MySQL {series}", sys::os())
+}
+
+/// The file name at the end of a URL, for the download cache.
+fn url_file(url: &str) -> String { url.rsplit('/').next().unwrap_or("download").to_string() }
+
+/// Build Redis from its source release with make (macOS and Linux have no official binaries).
+fn build_redis(version: &str, dest: &Path) -> R<()> {
+    let tgz = fetch::download(&format!("https://github.com/redis/redis/archive/refs/tags/{version}.tar.gz"), &format!("redis-{version}-src.tar.gz"))?;
+    let build = paths::cache_dir().join(format!("redis-build-{version}"));
+    let _ = std::fs::remove_dir_all(&build);
+    fetch::extract_flat(&tgz, &build, &[])?;
+    fetch::ensure_space(&build, 500 << 20)?;
+    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    util::step(&format!("Compiling Redis {version} from source (about a minute; the log is {})", build.join("tez-build.log").display()));
+    let log = std::fs::File::create(build.join("tez-build.log"))?;
+    let st = std::process::Command::new("make")
+        .arg(format!("-j{jobs}")).arg("BUILD_TLS=no")
+        .current_dir(&build)
+        .stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log)
+        .status()?;
+    if !st.success() {
+        bail!("compiling Redis failed:\n{}", util::tail(&build.join("tez-build.log"), 25));
+    }
+    std::fs::create_dir_all(dest)?;
+    for b in ["redis-server", "redis-cli"] {
+        std::fs::copy(build.join("src").join(b), dest.join(b))?;
+        fetch::make_executable(&dest.join(b))?;
+    }
+    let _ = std::fs::remove_dir_all(&build);
+    Ok(())
+}
+
+/// Release asset names for this machine: (mailpit, meilisearch, rustfs).
+fn asset_names(version: &str) -> (String, String, String) {
+    let (os, arch) = (sys::os(), sys::arch());
+    let go_arch = if arch == "aarch64" { "arm64" } else { "amd64" };
+    let mailpit = match os { "windows" => "mailpit-windows-amd64.zip".to_string(), "macos" => format!("mailpit-darwin-{go_arch}.tar.gz"), _ => format!("mailpit-linux-{go_arch}.tar.gz") };
+    let meili = match (os, arch) {
+        ("windows", _) => "meilisearch-windows-amd64.exe".to_string(),
+        ("macos", "aarch64") => "meilisearch-macos-apple-silicon".into(),
+        ("macos", _) => "meilisearch-macos-amd64".into(),
+        (_, "aarch64") => "meilisearch-linux-aarch64".into(),
+        _ => "meilisearch-linux-amd64".into(),
+    };
+    let rustfs = match (os, arch) {
+        ("windows", _) => format!("rustfs-windows-x86_64-v{version}.zip"),
+        ("macos", _) => format!("rustfs-macos-aarch64-v{version}.zip"),
+        (_, "aarch64") => format!("rustfs-linux-aarch64-gnu-v{version}.zip"),
+        _ => format!("rustfs-linux-x86_64-gnu-v{version}.zip"),
+    };
+    (mailpit, meili, rustfs)
 }
 
 // ------------------------------------------------------------------ install
@@ -183,10 +330,12 @@ fn mysql_release(series: &str) -> R<(String, String)> {
 pub fn install(name: &str, version: Option<&str>) -> R<String> {
     let info = info(name)?;
     let k = kind(name);
+    available(k)?;
     let version = version.unwrap_or(info.version).trim_start_matches('v').to_string();
     let d = dir(k, &version);
+    let win = cfg!(windows);
     let stored = match k {
-        "postgres" => {
+        "postgres" if win => {
             let full = postgres_full_version(&version)?;
             util::step(&format!("Downloading PostgreSQL {full} (EnterpriseDB build)"));
             let zip = fetch::download(&edb_url(&full), &format!("postgresql-{full}-1-windows-x64-binaries.zip"))?;
@@ -199,10 +348,32 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
             util::ok(&format!("PostgreSQL {full}"));
             return Ok(major);
         }
+        "postgres" => {
+            let tag = postgres_full_version(&version)?;
+            let file = format!("postgresql-{tag}-{}.tar.gz", theseus_triple());
+            let url = format!("https://github.com/{THESEUS}/releases/download/{tag}/{file}");
+            util::step(&format!("Downloading PostgreSQL {tag} ({file})"));
+            let tgz = fetch::download(&url, &file)?;
+            if let Ok(sum) = fetch::get_text(&format!("{url}.sha256")) {
+                let h = sum.split_whitespace().next().unwrap_or_default().to_string();
+                if h.len() == 64 { fetch::verify_sha256(&tgz, &h)?; }
+            }
+            fetch::extract_flat(&tgz, &d, &[])?;
+            for b in ["postgres", "initdb", "pg_ctl", "psql", "pg_dump", "pg_restore"] {
+                let p = d.join("bin").join(b);
+                if p.exists() { fetch::make_executable(&p)?; }
+            }
+            std::fs::write(d.join(".tez-version"), &tag)?;
+            let major = series(k, &tag);
+            init_postgres(&major)?;
+            util::ok(&format!("PostgreSQL {tag}"));
+            return Ok(major);
+        }
         "mongodb" => {
             let (full, url) = mongodb_release(&series(k, &version))?;
             util::step(&format!("Downloading MongoDB {full}"));
-            let zip = fetch::download(&url, &format!("mongodb-windows-x86_64-{full}.zip"))?;
+            let cached = if win { format!("mongodb-windows-x86_64-{full}.zip") } else { url_file(&url) };
+            let zip = fetch::download(&url, &cached)?;
             fetch::extract_flat(&zip, &d, &["*.pdb"])?;
             std::fs::write(d.join(".tez-version"), &full)?;
             series(k, &full)
@@ -210,7 +381,8 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
         "mariadb" => {
             let (full, url) = mariadb_release(&series(k, &version))?;
             util::step(&format!("Downloading MariaDB {full}"));
-            let zip = fetch::download(&url, &format!("mariadb-{full}-winx64.zip"))?;
+            let cached = if win { format!("mariadb-{full}-winx64.zip") } else { url_file(&url) };
+            let zip = fetch::download(&url, &cached)?;
             fetch::extract_flat(&zip, &d, &["*.pdb", "*/mysql-test", "*/sql-bench"])?;
             std::fs::write(d.join(".tez-version"), &full)?;
             init_mariadb(&series(k, &full))?;
@@ -219,33 +391,49 @@ pub fn install(name: &str, version: Option<&str>) -> R<String> {
         "mysql" => {
             let (full, url) = mysql_release(&series(k, &version))?;
             util::step(&format!("Downloading MySQL {full}"));
-            let zip = fetch::download(&url, &format!("mysql-{full}-winx64.zip"))?;
+            let cached = if win { format!("mysql-{full}-winx64.zip") } else { url_file(&url) };
+            let zip = fetch::download(&url, &cached)?;
             fetch::extract_flat(&zip, &d, &["*.pdb", "*/lib/debug", "*/mysql-test", "*/docs"])?;
             std::fs::write(d.join(".tez-version"), &full)?;
             init_mysql(&series(k, &full))?;
             series(k, &full)
         }
-        "redis" => {
+        "redis" if win => {
             let file = format!("Redis-{version}-Windows-x64-msys2.zip");
             let zip = fetch::download(&format!("https://github.com/redis-windows/redis-windows/releases/download/{version}/{file}"), &file)?;
             fetch::extract_flat(&zip, &d, &[])?;
             version.clone()
         }
+        "redis" => {
+            build_redis(&version, &d)?;
+            version.clone()
+        }
         "mailpit" => {
-            let zip = fetch::download(&format!("https://github.com/axllent/mailpit/releases/download/v{version}/mailpit-windows-amd64.zip"), &format!("mailpit-{version}-windows-amd64.zip"))?;
+            let (asset, _, _) = asset_names(&version);
+            let cached = if win { format!("mailpit-{version}-windows-amd64.zip") } else { format!("mailpit-{version}-{asset}") };
+            let zip = fetch::download(&format!("https://github.com/axllent/mailpit/releases/download/v{version}/{asset}"), &cached)?;
             fetch::extract(&zip, &d, &[])?;
+            fetch::make_executable(&exe(k, &version))?;
             version.clone()
         }
         "meilisearch" => {
-            let file = fetch::download(&format!("https://github.com/meilisearch/meilisearch/releases/download/v{version}/meilisearch-windows-amd64.exe"), &format!("meilisearch-{version}-windows-amd64.exe"))?;
+            let (_, asset, _) = asset_names(&version);
+            let cached = if win { format!("meilisearch-{version}-windows-amd64.exe") } else { format!("{asset}-v{version}") };
+            let file = fetch::download(&format!("https://github.com/meilisearch/meilisearch/releases/download/v{version}/{asset}"), &cached)?;
             std::fs::create_dir_all(&d)?;
-            std::fs::copy(file, d.join("meilisearch.exe"))?;
+            std::fs::copy(file, exe(k, &version))?;
+            fetch::make_executable(&exe(k, &version))?;
             version.clone()
         }
         "rustfs" => {
-            let file = format!("rustfs-windows-x86_64-v{version}.zip");
+            let (_, _, file) = asset_names(&version);
             let zip = fetch::download(&format!("https://github.com/rustfs/rustfs/releases/download/{version}/{file}"), &file)?;
             fetch::extract(&zip, &d, &[])?;
+            // Some archives keep the binary in a folder; bring it up beside .tez-version.
+            if !exe(k, &version).exists() {
+                if let Some(found) = find_file(&d, &sys::exe("rustfs")) { std::fs::rename(found, exe(k, &version))?; }
+            }
+            fetch::make_executable(&exe(k, &version))?;
             version.clone()
         }
         _ => bail!("cannot install {k}"),
@@ -262,7 +450,7 @@ fn init_postgres(major: &str) -> R<()> {
     let bin = dir("postgres", major).join("bin");
     std::fs::create_dir_all(data.parent().unwrap())?;
     util::step("Creating the database cluster (superuser `postgres`, local connections trusted)");
-    let out = std::process::Command::new(bin.join("initdb.exe"))
+    let out = std::process::Command::new(bin.join(sys::exe("initdb")))
         .arg("-D").arg(&data)
         .args(["-U", "postgres", "-E", "UTF8", "--locale=C", "--auth=trust"])
         .output()?;
@@ -279,10 +467,21 @@ fn init_postgres(major: &str) -> R<()> {
 fn init_mariadb(s: &str) -> R<()> {
     let data = data("mariadb", s);
     if data.join("mysql").exists() { return Ok(()); }
-    let bin = dir("mariadb", s).join("bin");
-    let tool = first_existing(&bin, &["mariadb-install-db.exe", "mysql_install_db.exe"]);
+    let base = dir("mariadb", s);
     util::step("Creating the MariaDB data folder (user root, no password, local only)");
-    let out = std::process::Command::new(tool).arg(format!("--datadir={}", data.display())).output()?;
+    let out = if cfg!(windows) {
+        let tool = first_existing(&base.join("bin"), &["mariadb-install-db.exe", "mysql_install_db.exe"]);
+        std::process::Command::new(tool).arg(format!("--datadir={}", data.display())).output()?
+    } else {
+        // The Linux archive keeps the script in scripts/; root gets an empty password (no unix_socket).
+        let tool = first_existing(&base.join("scripts"), &["mariadb-install-db", "mysql_install_db"]);
+        std::process::Command::new(tool)
+            .arg("--no-defaults")
+            .arg(format!("--basedir={}", base.display()))
+            .arg(format!("--datadir={}", data.display()))
+            .arg("--auth-root-authentication-method=normal")
+            .output()?
+    };
     if !out.status.success() { bail!("mariadb-install-db failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)); }
     Ok(())
 }
@@ -292,8 +491,11 @@ fn init_mysql(s: &str) -> R<()> {
     if data.join("mysql").exists() { return Ok(()); }
     let d = dir("mysql", s);
     util::step("Creating the MySQL data folder (user root, no password, local only)");
-    let out = std::process::Command::new(d.join("bin").join("mysqld.exe"))
-        .args(["--initialize-insecure", "--console"])
+    let mut cmd = std::process::Command::new(d.join("bin").join(sys::exe("mysqld")));
+    if !cfg!(windows) { cmd.arg("--no-defaults"); }
+    cmd.arg("--initialize-insecure");
+    if cfg!(windows) { cmd.arg("--console"); }
+    let out = cmd
         .arg(format!("--basedir={}", d.display()))
         .arg(format!("--datadir={}", data.display()))
         .output()?;
@@ -302,6 +504,16 @@ fn init_mysql(s: &str) -> R<()> {
 }
 
 // ------------------------------------------------------------------ PostgreSQL extensions
+
+/// The first file named `name` anywhere under `dir`.
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() { if let Some(f) = find_file(&p, name) { return Some(f); } }
+        else if p.file_name().map(|n| n == name).unwrap_or(false) { return Some(p); }
+    }
+    None
+}
 
 fn copy_tree(src: &Path, dest: &Path) -> R<()> {
     std::fs::create_dir_all(dest)?;
@@ -319,6 +531,9 @@ fn timescale_versions(pg: &Path) -> Vec<String> {
 
 /// Add an extension to one PostgreSQL major. Returns the version installed.
 pub fn install_pg_extension(major: &str, ext: &str, version: Option<&str>) -> R<String> {
+    if !pg_extensions_available() {
+        bail!("{ext} is not available on {} yet: tez adds TimescaleDB, PostGIS and pgvector to the Windows builds only (every build has the contrib extensions: pgcrypto, hstore, citext, pg_trgm, uuid-ossp...)", sys::os());
+    }
     let pg = paths::service_dir("postgres", major);
     if !pg.join("bin").join("postgres.exe").exists() { bail!("PostgreSQL {major} is not installed"); }
     let tmp = paths::cache_dir().join(format!("pgext-{ext}-{major}"));
@@ -449,6 +664,9 @@ fn write_postgres_conf(major: &str, port: u16, sc: &ServiceConfig) -> R<()> {
     let data = data("postgres", major);
     let has_ts = dir("postgres", major).join("lib").join("timescaledb.dll").exists();
     let mut s = format!("# Written by tez on every start; change these in the dashboard (Services).\nlisten_addresses = '127.0.0.1'\nport = {port}\nlog_destination = 'stderr'\nlogging_collector = off\n");
+    // Portable builds may default the socket to /var/run/postgresql, which needs root; tez
+    // connects over TCP, so keep the socket beside the data.
+    if !cfg!(windows) { s.push_str(&format!("unix_socket_directories = '{}'\n", paths::fwd(&data))); }
     for (k, _, _) in options_for("postgres") {
         if k.starts_with("timescaledb.") && !has_ts { continue; }
         let v = opt(sc, "postgres", k);
@@ -493,7 +711,7 @@ pub fn spec(key: &str, sc: &ServiceConfig) -> R<Spec> {
         "postgres" => {
             write_postgres_conf(&version, port, sc)?;
             s.args(["-D".to_string(), paths::fwd(&data)])
-                .stop_with(base.join("bin").join("pg_ctl.exe"), vec!["stop".into(), "-D".into(), paths::fwd(&data), "-m".into(), "fast".into(), "-w".into(), "-t".into(), "20".into()])
+                .stop_with(base.join("bin").join(sys::exe("pg_ctl")), vec!["stop".into(), "-D".into(), paths::fwd(&data), "-m".into(), "fast".into(), "-w".into(), "-t".into(), "20".into()])
         }
         "mysql" | "mariadb" => {
             let mut a: Vec<String> = Vec::new();
@@ -503,13 +721,18 @@ pub fn spec(key: &str, sc: &ServiceConfig) -> R<Spec> {
             a.push(format!("--datadir={}", data.display()));
             a.push(format!("--port={port}"));
             a.push("--bind-address=127.0.0.1".into());
-            a.push("--console".into());
+            if cfg!(windows) {
+                a.push("--console".into());
+            } else {
+                // Its own socket (not /tmp/mysql.sock, which another MySQL may own).
+                a.push(format!("--socket={}", data.join("mysqld.sock").display()));
+            }
             if k == "mysql" { a.push("--mysqlx=OFF".into()); }
             for (ok, _, _) in options_for(k) {
                 let v = opt(sc, k, ok);
                 if !v.is_empty() { a.push(format!("--{ok}={v}")); }
             }
-            let admin = first_existing(&base.join("bin"), &["mariadb-admin.exe", "mysqladmin.exe"]);
+            let admin = first_existing(&base.join("bin"), &[sys::exe("mariadb-admin").as_str(), sys::exe("mysqladmin").as_str()]);
             s.args(a).stop_with(admin, vec!["-u".into(), "root".into(), "-h".into(), "127.0.0.1".into(), format!("--port={port}"), "shutdown".into()])
         }
         "mongodb" => s.args([
@@ -522,7 +745,7 @@ pub fn spec(key: &str, sc: &ServiceConfig) -> R<Spec> {
             let conf = write_redis_conf(port, sc)?;
             s.args(["redis.conf".to_string()])
                 .cwd(conf.parent().unwrap().to_path_buf())
-                .stop_with(base.join("redis-cli.exe"), vec!["-p".into(), port.to_string(), "shutdown".into()])
+                .stop_with(base.join(sys::exe("redis-cli")), vec!["-p".into(), port.to_string(), "shutdown".into()])
         }
         "mailpit" => s
             .args([
@@ -569,7 +792,7 @@ pub fn psql(cfg: &Config, db: &str, sql: &str) -> R<String> {
     let sc = cfg.services.get("postgres").cloned().unwrap_or_default();
     let version = version_of("postgres", &sc);
     let port = port_of("postgres", &sc);
-    let out = std::process::Command::new(dir("postgres", &version).join("bin").join("psql.exe"))
+    let out = std::process::Command::new(dir("postgres", &version).join("bin").join(sys::exe("psql")))
         .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-tAc", sql])
         .output()?;
     if !out.status.success() { bail!("{}", String::from_utf8_lossy(&out.stderr).trim()); }
@@ -607,7 +830,7 @@ pub fn mysql_exec(cfg: &Config, key: &str, sql: &str) -> R<String> {
     let sc = cfg.services.get(key).cloned().unwrap_or_default();
     let version = version_of(key, &sc);
     let bin = dir(kind(key), &version).join("bin");
-    let client = first_existing(&bin, &["mariadb.exe", "mysql.exe"]);
+    let client = first_existing(&bin, &[sys::exe("mariadb").as_str(), sys::exe("mysql").as_str()]);
     let out = std::process::Command::new(client)
         .args(["-u", "root", "-h", "127.0.0.1", &format!("--port={}", port_of(key, &sc)), "-N", "-e", sql])
         .output()?;

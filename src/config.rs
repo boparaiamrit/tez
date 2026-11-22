@@ -66,7 +66,7 @@ impl Default for ServiceConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        let sites_dir = std::env::var("USERPROFILE").map(|p| format!("{p}\\Sites")).unwrap_or_default();
+        let sites_dir = paths::user_home().join("Sites").display().to_string();
         Config {
             tld: "test".into(),
             default_php: "8.4".into(),
