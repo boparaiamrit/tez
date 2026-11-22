@@ -1,0 +1,18 @@
+[package]
+name = "tez"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, native Laravel development environment for Windows: every PHP version, PostgreSQL with TimescaleDB, Redis, Meilisearch, Mailpit, S3 and Horizon, from one binary."
+license = "MIT"
+authors = ["Amritpal Singh"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"

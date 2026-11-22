@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tez</title>
+<style>
+:root {
+  /* spacing scale */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s6: 24px; --s8: 32px; --s12: 48px;
+  /* type scale */
+  --t12: 12px; --t14: 14px; --t16: 16px; --t20: 20px; --t24: 24px;
+  /* cool grays, light theme */
+  --bg: hsl(220 20% 97%);
+  --panel: hsl(0 0% 100%);
+  --panel-2: hsl(220 18% 95%);
+  --line: hsl(220 14% 89%);
+  --text: hsl(222 28% 14%);
+  --text-2: hsl(220 10% 38%);
+  --text-3: hsl(220 9% 52%);
+  --accent: hsl(252 80% 58%);
+  --accent-soft: hsl(252 90% 96%);
+  --accent-text: hsl(252 60% 42%);
+  --ok: hsl(150 62% 38%);
+  --ok-soft: hsl(150 60% 94%);
+  --warn: hsl(36 92% 46%);
+  --warn-soft: hsl(40 95% 93%);
+  --bad: hsl(355 72% 52%);
+  --bad-soft: hsl(355 90% 96%);
+  --shadow-sm: 0 1px 2px hsl(220 30% 20% / .06), 0 1px 3px hsl(220 30% 20% / .08);
+  --shadow-md: 0 4px 8px hsl(220 30% 20% / .06), 0 2px 4px hsl(220 30% 20% / .06);
+  --radius: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: hsl(225 22% 8%);
+    --panel: hsl(224 20% 11%);
+    --panel-2: hsl(224 18% 14%);
+    --line: hsl(224 16% 19%);
+    --text: hsl(220 20% 93%);
+    --text-2: hsl(220 12% 70%);
+    --text-3: hsl(220 10% 56%);
+    --accent: hsl(252 92% 72%);
+    --accent-soft: hsl(252 40% 20%);
+    --accent-text: hsl(252 95% 82%);
+    --ok: hsl(150 60% 52%);
+    --ok-soft: hsl(150 40% 15%);
+    --warn: hsl(40 92% 58%);
+    --warn-soft: hsl(38 50% 16%);
+    --bad: hsl(355 85% 66%);
+    --bad-soft: hsl(355 45% 17%);
+    --shadow-sm: 0 1px 2px hsl(0 0% 0% / .3);
+    --shadow-md: 0 6px 16px hsl(0 0% 0% / .35);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 400 var(--t14)/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, .mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: var(--t12); }
+
+header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: var(--s6);
+  padding: var(--s3) var(--s6);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: baseline; gap: var(--s2); }
+.brand b { font-size: var(--t20); font-weight: 700; letter-spacing: -.02em; }
+.brand span { color: var(--text-3); font-size: var(--t12); }
+nav { display: flex; gap: var(--s1); }
+nav button {
+  border: 0; background: transparent; color: var(--text-2);
+  font: 600 var(--t14)/1 inherit; padding: var(--s2) var(--s3); border-radius: 8px; cursor: pointer;
+  transition: background .15s ease-out, color .15s ease-out;
+}
+nav button:hover { background: var(--panel-2); color: var(--text); }
+nav button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.summary { margin-left: auto; display: flex; align-items: center; gap: var(--s3); color: var(--text-2); font-size: var(--t12); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--s2); border-radius: 999px; background: var(--panel-2); font-size: var(--t12); font-weight: 600; color: var(--text-2); white-space: nowrap; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+.dot.running { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.dot.backoff, .dot.starting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.dot.failed { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+
+main { max-width: 1100px; margin: 0 auto; padding: var(--s8) var(--s6) var(--s12); }
+.section-head { display: flex; align-items: baseline; gap: var(--s3); margin: 0 0 var(--s4); }
+.section-head h2 { margin: 0; font-size: var(--t20); font-weight: 650; letter-spacing: -.01em; }
+.section-head p { margin: 0; color: var(--text-3); }
+.notes { margin: 0 0 var(--s6); display: grid; gap: var(--s2); }
+.note { background: var(--warn-soft); color: var(--text); border-radius: var(--radius); padding: var(--s3) var(--s4); font-size: var(--t14); }
+
+.cards { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.card { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: var(--s4) var(--s4) var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
+.card-top { display: flex; align-items: flex-start; gap: var(--s3); }
+.card-top .name { font-size: var(--t16); font-weight: 650; }
+.card-top .sub { color: var(--text-3); font-size: var(--t12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.card-top .right { margin-left: auto; display: flex; gap: var(--s2); align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t12); color: var(--text-2); background: var(--panel-2); padding: 3px var(--s2); border-radius: 6px; }
+.actions { display: flex; gap: var(--s2); border-top: 1px solid var(--line); padding-top: var(--s3); }
+.btn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  font: 600 var(--t12)/1 inherit; padding: 7px var(--s3); border-radius: 7px; cursor: pointer;
+  transition: background .15s ease-out, border-color .15s ease-out;
+}
+.btn:hover { background: var(--panel-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
+.btn.ghost:hover { background: var(--panel-2); color: var(--text); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
+th, td { text-align: left; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { font-size: var(--t12); font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
+tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+td .muted, .muted { color: var(--text-3); }
+.row-actions { display: flex; gap: var(--s1); justify-content: flex-end; }
+
+.log-wrap { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
+.log-bar { display: flex; gap: var(--s3); align-items: center; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
+select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 6px var(--s2); }
+pre.log { margin: 0; padding: var(--s4); height: 60vh; overflow: auto; font: 12px/1.55 "Cascadia Code", Consolas, monospace; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+
+.dump { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); margin-bottom: var(--s3); overflow: hidden; }
+.dump-head { display: flex; gap: var(--s3); padding: var(--s2) var(--s4); font-size: var(--t12); color: var(--text-3); border-bottom: 1px solid var(--line); }
+.dump-head b { color: var(--text-2); font-weight: 600; }
+.dump iframe { width: 100%; border: 0; display: block; min-height: 60px; background: #fff; }
+
+.empty { text-align: center; padding: var(--s12) var(--s6); background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); color: var(--text-2); }
+.empty h3 { margin: 0 0 var(--s2); font-size: var(--t16); color: var(--text); }
+.empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 5px; }
+.hidden { display: none !important; }
+.toast { position: fixed; bottom: var(--s6); right: var(--s6); background: var(--text); color: var(--bg); padding: var(--s3) var(--s4); border-radius: 8px; box-shadow: var(--shadow-md); font-weight: 600; opacity: 0; transform: translateY(8px); transition: all .2s ease-out; pointer-events: none; }
+.toast.show { opacity: 1; transform: none; }
+@media (max-width: 640px) {
+  header { flex-wrap: wrap; gap: var(--s2); padding: var(--s3) var(--s4); }
+  .summary { margin-left: 0; width: 100%; }
+  nav { overflow-x: auto; }
+  main { padding: var(--s6) var(--s4); }
+  .cards { grid-template-columns: 1fr; }
+  th:nth-child(4), td:nth-child(4) { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>tez</b><span id="ver"></span></div>
+  <nav role="tablist">
+    <button role="tab" data-tab="sites" aria-selected="true">Sites</button>
+    <button role="tab" data-tab="services">Services</button>
+    <button role="tab" data-tab="php">PHP</button>
+    <button role="tab" data-tab="dumps">Dumps</button>
+    <button role="tab" data-tab="logs">Logs</button>
+    <button role="tab" data-tab="mail">Mail</button>
+  </nav>
+  <div class="summary" id="summary"></div>
+</header>
+
+<main>
+  <div class="notes" id="notes"></div>
+
+  <section data-panel="sites">
+    <div class="section-head"><h2>Sites</h2><p id="sites-sub"></p></div>
+    <div class="cards" id="sites"></div>
+  </section>
+
+  <section data-panel="services" class="hidden">
+    <div class="section-head"><h2>Services</h2><p>Native Windows builds, listening on 127.0.0.1 only</p></div>
+    <table><thead><tr><th>Service</th><th>Version</th><th class="num">Port</th><th class="num">Memory</th><th></th></tr></thead><tbody id="services"></tbody></table>
+    <div class="section-head" style="margin-top:var(--s8)"><h2>Processes</h2><p>Everything tez keeps running, restarted automatically if it stops</p></div>
+    <table><thead><tr><th>Process</th><th>State</th><th class="num">Uptime</th><th class="num">Memory</th><th></th></tr></thead><tbody id="procs"></tbody></table>
+  </section>
+
+  <section data-panel="php" class="hidden">
+    <div class="section-head"><h2>PHP</h2><p>Official windows.php.net builds. Change with <code>tez use 8.4</code> or <code>tez isolate 8.1</code></p></div>
+    <table><thead><tr><th>Version</th><th>Release</th><th>Used by</th><th></th></tr></thead><tbody id="php"></tbody></table>
+  </section>
+
+  <section data-panel="dumps" class="hidden">
+    <div class="section-head"><h2>Dumps</h2><p id="dumps-sub">Every <code>dump()</code> and <code>dd()</code>, newest first</p>
+      <button class="btn ghost" style="margin-left:auto" id="clear-dumps">Clear</button></div>
+    <div id="dumps"></div>
+  </section>
+
+  <section data-panel="logs" class="hidden">
+    <div class="log-wrap">
+      <div class="log-bar"><select id="log-pick"></select><span class="muted" id="log-path"></span>
+        <label class="muted" style="margin-left:auto"><input type="checkbox" id="log-follow" checked> Follow</label></div>
+      <pre class="log" id="log"></pre>
+    </div>
+  </section>
+
+  <section data-panel="mail" class="hidden">
+    <div class="empty" id="mail-box"></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const H = { 'X-Tez': 'dashboard' };
+let S = null, tab = (location.hash || '#sites').slice(1), logName = null;
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const mb = b => !b ? '' : b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : Math.round(b / (1 << 20)) + ' MB';
+const up = s => !s ? '' : s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
+const toast = msg => { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 1800); };
+async function post(path, msg) {
+  const r = await fetch(path, { method: 'POST', headers: H });
+  const j = await r.json().catch(() => ({}));
+  toast(r.ok ? msg : (j.error || 'Failed'));
+  setTimeout(refresh, 400);
+}
+
+function show(name) {
+  tab = name; history.replaceState(null, '', '#' + name);
+  document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === name));
+  document.querySelectorAll('[data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+  if (name === 'logs') loadLog();
+  if (name === 'dumps') loadDumps();
+}
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
+
+function procState(name) { return S.procs.find(p => p.name === name); }
+
+function renderSummary() {
+  const run = S.procs.filter(p => p.state === 'running').length, bad = S.procs.filter(p => p.state === 'failed' || p.state === 'backoff').length;
+  $('#ver').textContent = 'v' + S.version;
+  $('#summary').innerHTML =
+    `<span class="pill ${bad ? 'warn' : 'ok'}"><span class="dot ${bad ? 'backoff' : 'running'}"></span>${run} running${bad ? ` · ${bad} restarting` : ''}</span>` +
+    `<span>${mb(S.memory)} in use</span>`;
+  $('#notes').innerHTML = (S.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('');
+}
+
+function renderSites() {
+  const el = $('#sites');
+  $('#sites-sub').textContent = S.sites.length ? `${S.sites.length} site${S.sites.length > 1 ? 's' : ''} · folders in your parked paths are served automatically` : '';
+  if (!S.sites.length) {
+    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sites yet</h3><p>Put a project in <code>%USERPROFILE%\\Sites</code>, or run <code>tez link</code> inside one.</p></div>`;
+    return;
+  }
+  el.innerHTML = S.sites.map(s => {
+    const procs = Object.entries(s.processes || {});
+    const chips = procs.map(([n, why]) => {
+      const p = procState(`${s.name}/${n}`);
+      const st = p ? p.state : 'stopped';
+      return `<span class="chip" title="${esc(why)}"><span class="dot ${st}"></span>${esc(n)}</span>`;
+    }).join('');
+    const horizon = procs.some(([n]) => n === 'horizon');
+    return `<article class="card">
+      <div class="card-top">
+        <div style="min-width:0"><div class="name">${esc(s.name)}</div><div class="sub" title="${esc(s.path)}">${esc(s.path)}</div></div>
+        <div class="right"><span class="pill" title="${s.isolated ? 'Pinned with tez isolate' : 'From composer.json or the default'}">PHP ${esc(s.php)}${s.isolated ? ' · pinned' : ''}</span></div>
+      </div>
+      <div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url.replace('https://', ''))}</a>
+        <span class="muted"> · </span><a href="${esc(s.localhost)}" target="_blank" rel="noopener" class="muted">.localhost</a></div>
+      ${chips ? `<div class="chips">${chips}</div>` : `<div class="muted">${s.laravel ? 'No background processes needed' : 'Static or plain PHP site'}</div>`}
+      <div class="actions">
+        <a class="btn primary" href="${esc(s.url)}" target="_blank" rel="noopener">Open</a>
+        ${procs.length ? (s.up
+          ? `<button class="btn" data-site="${esc(s.name)}" data-act="down">Stop processes</button>`
+          : `<button class="btn" data-site="${esc(s.name)}" data-act="up">Start processes</button>`) : ''}
+        ${horizon ? `<a class="btn ghost" href="${esc(s.url)}/horizon" target="_blank" rel="noopener">Horizon</a>` : ''}
+        ${s.laravel ? `<button class="btn ghost" data-sitelog="${esc(s.name)}">Laravel log</button>` : ''}
+      </div>
+    </article>`;
+  }).join('');
+  el.querySelectorAll('[data-act]').forEach(b => b.onclick = () => { b.disabled = true; post(`/api/site/${b.dataset.site}/${b.dataset.act}`, b.dataset.act === 'up' ? 'Starting processes' : 'Stopping processes'); });
+  el.querySelectorAll('[data-sitelog]').forEach(b => b.onclick = () => { logName = 'site:' + b.dataset.sitelog; show('logs'); });
+}
+
+function procRow(p, label) {
+  const link = p.url ? `<a class="btn ghost" href="${esc(p.url)}" target="_blank" rel="noopener">Open</a>` : '';
+  const toggle = p.state === 'running' || p.state === 'backoff'
+    ? `<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="stop">Stop</button>`
+    : `<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="start">Start</button>`;
+  return `<div class="row-actions">${link}<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="restart">Restart</button>${toggle}<button class="btn ghost" data-logof="${esc(p.name)}">Log</button></div>`;
+}
+
+function renderServices() {
+  $('#services').innerHTML = S.services.map(sv => {
+    const p = procState(sv.name);
+    const st = !sv.installed ? 'not installed' : !sv.enabled ? 'disabled' : p ? p.state : 'stopped';
+    return `<tr>
+      <td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p ? p.state : ''}"></span><div><b>${esc(sv.title)}</b><div class="muted" style="font-size:12px">${esc(sv.about)}</div></div></div></td>
+      <td>${esc(sv.version)} <span class="muted">${st === 'running' ? '' : '· ' + esc(st)}</span></td>
+      <td class="num">${sv.port}</td><td class="num">${p ? mb(p.memory) : ''}</td>
+      <td>${p ? procRow(p) : sv.installed ? '' : `<span class="muted mono">tez service install ${esc(sv.name)}</span>`}</td></tr>`;
+  }).join('');
+  $('#procs').innerHTML = S.procs.map(p => `<tr>
+      <td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p.state}"></span><span class="mono">${esc(p.name)}</span></div></td>
+      <td>${esc(p.state)}${p.restarts ? ` <span class="muted">· ${p.restarts} restart${p.restarts > 1 ? 's' : ''}</span>` : ''}${p.state !== 'running' && p.last_exit ? `<div class="muted" style="font-size:12px">${esc(p.last_exit)}</div>` : ''}</td>
+      <td class="num">${up(p.uptime)}</td><td class="num">${mb(p.memory)}</td><td>${procRow(p)}</td></tr>`).join('');
+  document.querySelectorAll('[data-pact]').forEach(b => b.onclick = () => post(`/api/proc/${b.dataset.proc}/${b.dataset.pact}`, `${b.dataset.pact} ${b.dataset.proc}`));
+  document.querySelectorAll('[data-logof]').forEach(b => b.onclick = () => { logName = b.dataset.logof; show('logs'); });
+}
+
+function renderPhp() {
+  $('#php').innerHTML = S.php.map(v => {
+    const users = S.sites.filter(s => s.php === v.minor).map(s => s.name);
+    const workers = S.procs.filter(p => p.name.startsWith(`php-${v.minor}-`));
+    const running = workers.filter(p => p.state === 'running').length;
+    return `<tr><td><b>PHP ${esc(v.minor)}</b> ${v.default ? '<span class="pill ok">default</span>' : ''}</td>
+      <td class="mono">${esc(v.version)}</td>
+      <td>${users.length ? esc(users.join(', ')) : '<span class="muted">no sites</span>'}</td>
+      <td class="muted">${workers.length ? `${running}/${workers.length} workers` : ''}</td></tr>`;
+  }).join('') + `<tr><td colspan="4" class="muted">Xdebug is ${S.xdebug ? '<b>on</b>' : 'off'} · <code>tez xdebug on</code> · <code>tez ext install &lt;name&gt; --php all</code> adds any PECL extension</td></tr>`;
+}
+
+function renderLogPick() {
+  const pick = $('#log-pick');
+  const opts = [['daemon', 'tez daemon'], ...S.sites.filter(s => s.laravel).map(s => ['site:' + s.name, s.name + ' · laravel.log']), ...S.procs.map(p => [p.name, p.name])];
+  const cur = logName || pick.value || 'daemon';
+  pick.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+  pick.onchange = () => { logName = pick.value; loadLog(); };
+}
+
+async function loadLog() {
+  renderLogPick();
+  const name = logName || $('#log-pick').value || 'daemon';
+  const url = name.startsWith('site:') ? `/api/sitelog/${encodeURIComponent(name.slice(5))}?n=400` : `/api/logs/${name}?n=400`;
+  const text = await fetch(url).then(r => r.text()).catch(() => '');
+  const pre = $('#log'), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+  pre.textContent = text || 'Nothing logged yet.';
+  if (atBottom || $('#log-follow').checked) pre.scrollTop = pre.scrollHeight;
+}
+
+async function loadDumps() {
+  const text = await fetch('/api/dumps?n=80').then(r => r.text()).catch(() => '');
+  const items = text.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
+  const el = $('#dumps');
+  if (!items.length) {
+    el.innerHTML = `<div class="empty"><h3>No dumps yet</h3><p>Turn Dumps on with <code>tez dumps on</code>, then call <code>dump($value)</code> anywhere.<br>They show here as well as on the page.</p></div>`;
+    return;
+  }
+  el.innerHTML = items.map((d, i) => `<div class="dump"><div class="dump-head"><b>${esc(d.site)}</b><span>${esc(d.uri)}</span>
+    <span style="margin-left:auto" class="mono">${esc((d.file || '').split(/[\\/]/).slice(-2).join('/'))}:${d.line}</span>
+    <span>${new Date(d.time * 1000).toLocaleTimeString()}</span></div><iframe sandbox data-i="${i}"></iframe></div>`).join('');
+  // Dumps are rendered in sandboxed frames: no scripts, no access to this page or its API.
+  el.querySelectorAll('iframe').forEach(f => {
+    f.srcdoc = `<style>body{margin:8px;font:12px Consolas,monospace}</style>` + items[+f.dataset.i].html;
+    f.onload = () => { try { f.style.height = Math.min(600, f.contentDocument.body.scrollHeight + 20) + 'px'; } catch { f.style.height = '200px'; } };
+  });
+}
+$('#clear-dumps').onclick = async () => { await fetch('/api/dumps', { method: 'DELETE', headers: H }); loadDumps(); };
+
+function renderMail() {
+  const m = S.services.find(s => s.name === 'mailpit');
+  const p = procState('mailpit');
+  $('#mail-box').innerHTML = p && p.state === 'running'
+    ? `<h3>Every email your apps send lands in Mailpit</h3><p>SMTP <code>127.0.0.1:${m.port}</code> · set <code>MAIL_HOST=127.0.0.1</code> and <code>MAIL_PORT=${m.port}</code></p><p><a class="btn primary" href="${esc(p.url)}" target="_blank" rel="noopener">Open inbox</a></p>`
+    : `<h3>Mailpit is not running</h3><p><code>tez service install mailpit</code></p>`;
+}
+
+async function refresh() {
+  try {
+    S = await fetch('/api/status').then(r => r.json());
+  } catch { $('#summary').innerHTML = '<span class="pill bad">tez is not running</span>'; return; }
+  renderSummary(); renderSites(); renderServices(); renderPhp(); renderMail();
+  if (tab === 'logs' && $('#log-follow').checked) loadLog();
+}
+refresh();
+show(['sites', 'services', 'php', 'dumps', 'logs', 'mail'].includes(tab) ? tab : 'sites');
+setInterval(() => { if (!document.hidden) refresh(); }, 2500);
+setInterval(() => { if (!document.hidden && tab === 'dumps') loadDumps(); }, 3000);
+</script>
+</body>
+</html>
