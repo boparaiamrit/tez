@@ -26,7 +26,7 @@ const BOUNDS: [f64; 20] = [2., 5., 10., 20., 30., 50., 75., 100., 150., 200., 30
 const HIST: usize = BOUNDS.len() + 1;
 
 #[derive(Clone, Default)]
-struct Minute { m: u64, req: u32, e4xx: u32, e5xx: u32, hist: [u32; HIST] }
+struct Minute { m: u64, req: u32, e4xx: u32, e5xx: u32, hist: [u32; HIST], max: f64 }
 
 #[derive(Clone)]
 struct Req { t: u64, route: String, ms: f64 }
@@ -155,6 +155,7 @@ fn add_request(s: &mut SiteStats, ts: f64, method: &str, uri: &str, status: u16,
     if (400..500).contains(&status) { mm.e4xx += 1; }
     if status >= 500 { mm.e5xx += 1; }
     mm.hist[bucket_of(ms)] += 1;
+    mm.max = mm.max.max(ms);
     s.recent.push_back(Req { t, route: format!("{method} {}", route(uri)), ms });
     if status >= 500 {
         s.errors.push_back(ServerError { t, status, method: method.to_string(), path: uri.split('?').next().unwrap_or(uri).to_string(), ms });
@@ -465,10 +466,11 @@ pub fn sites_json(range: &str) -> Value {
     for (name, s) in &store.sites {
         // The last five minutes.
         let mut hist5 = [0u32; HIST];
-        let (mut req5, mut e5) = (0u32, 0u32);
+        let (mut req5, mut e5, mut max5) = (0u32, 0u32, 0f64);
         for m in s.minutes.iter().filter(|m| m.m + 5 > now_m) {
             req5 += m.req;
             e5 += m.e5xx;
+            max5 = max5.max(m.max);
             for (i, n) in m.hist.iter().enumerate() { hist5[i] += n; }
         }
         let mut series = Vec::new();
@@ -476,12 +478,12 @@ pub fn sites_json(range: &str) -> Value {
         while b <= now_m {
             let end = b + width;
             let mut h = [0u32; HIST];
-            let (mut req, mut e4, mut e5b) = (0u32, 0u32, 0u32);
+            let (mut req, mut e4, mut e5b, mut maxb) = (0u32, 0u32, 0u32, 0f64);
             for m in s.minutes.iter().filter(|m| m.m >= b && m.m < end) {
-                req += m.req; e4 += m.e4xx; e5b += m.e5xx;
+                req += m.req; e4 += m.e4xx; e5b += m.e5xx; maxb = maxb.max(m.max);
                 for (i, n) in m.hist.iter().enumerate() { h[i] += n; }
             }
-            series.push(json!({ "t": b * 60, "req": req, "p50_ms": r1(percentile(&h, 0.5)), "p95_ms": r1(percentile(&h, 0.95)), "e4xx": e4, "e5xx": e5b }));
+            series.push(json!({ "t": b * 60, "req": req, "p50_ms": r1(percentile(&h, 0.5).min(maxb)), "p95_ms": r1(percentile(&h, 0.95).min(maxb)), "e4xx": e4, "e5xx": e5b }));
             b = end;
         }
         let mut by_route: HashMap<&str, Vec<f64>> = HashMap::new();
@@ -519,7 +521,7 @@ pub fn sites_json(range: &str) -> Value {
         });
         out.insert(name.clone(), json!({
             "rpm": r1(req5 as f64 / 5.0),
-            "p95_ms": r1(percentile(&hist5, 0.95)),
+            "p95_ms": r1(percentile(&hist5, 0.95).min(max5)),
             "err_rate": if req5 == 0 { 0.0 } else { (e5 as f64 / req5 as f64 * 1000.0).round() / 1000.0 },
             "series": series,
             "routes": routes.into_iter().map(|(m, p, c, p95, max)| json!({ "method": m, "path": p, "count": c, "p95_ms": r1(p95), "max_ms": r1(max) })).collect::<Vec<_>>(),
