@@ -26,7 +26,7 @@ const STATIC: &str = "https://dl.static-php.dev/static-php-cli/bulk/";
 /// Versions tez offers, oldest first (Herd's 7.4 to 8.5, plus 8.6).
 pub const MINORS: &[&str] = &["7.4", "8.0", "8.1", "8.2", "8.3", "8.4", "8.5", "8.6"];
 
-/// Versions static-php-cli publishes for macOS and Linux (8.6 is served by FrankenPHP's own PHP).
+/// Versions static-php-cli publishes for macOS and Linux.
 const STATIC_MINORS: &[&str] = &["8.0", "8.1", "8.2", "8.3", "8.4", "8.5"];
 
 /// Versions this OS has builds for.
@@ -140,7 +140,7 @@ pub fn normalize(v: &str) -> R<String> {
 pub fn install(minor: &str, cfg: &Config) -> R<String> {
     if !available_minors().contains(&minor) {
         bail!("PHP {minor} has no {} build; choose one of {}{}", sys::os(), available_minors().join(", "),
-            if minor == "8.6" { " (sites on 8.6 run inside FrankenPHP's own PHP 8.6)" } else { "" });
+            if minor == "8.6" { " (static PHP 8.6 builds are not published yet)" } else { "" });
     }
     let rel = releases()?.into_iter().find(|r| r.minor == minor);
     let Some(rel) = rel else { bail!("{} lists no build for PHP {minor}", if cfg!(windows) { "windows.php.net" } else { "static-php.dev" }) };
@@ -205,7 +205,7 @@ pub fn install(minor: &str, cfg: &Config) -> R<String> {
 
 fn vc_tags() -> &'static [&'static str] { &["vs18", "vs17", "vs16", "vc15"] }
 
-/// Install a PECL extension's DLL into a PHP folder (`ts` for FrankenPHP's thread-safe PHP).
+/// Install a PECL extension's DLL into a PHP folder (`ts` for a thread-safe PHP build).
 pub fn pecl_install_into(php_dir: &Path, minor: &str, ext: &str, ts: bool) -> R<String> {
     if !LOADABLE_EXTENSIONS {
         bail!("static PHP builds on macOS/Linux include their extensions; PECL add-ons are Windows-only for now (`php -m` lists what PHP {minor} has)");

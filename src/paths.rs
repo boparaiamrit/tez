@@ -5,7 +5,7 @@
 //! bin/        tez, plus php, composer (and exec on Windows): the same binary under other names
 //! php/<x.y>/  one folder per PHP version (windows.php.net builds; static builds on macOS/Linux)
 //! lib/php/    the PHP files tez loads into every PHP run (Horizon support, dumps)
-//! services/   <name>/<version>/ binaries: postgres, redis, mailpit, meilisearch, rustfs, frankenphp
+//! services/   <name>/<version>/ binaries: postgres, redis, mailpit, meilisearch, rustfs, caddy
 //! data/       service data (databases, mail, search indexes, buckets)
 //! config/     tez.json, the generated Caddyfile, certificates, cacert.pem, php overrides
 //! logs/       one log per managed process

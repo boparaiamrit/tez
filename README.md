@@ -46,7 +46,7 @@ cargo build --release --workspace     # tez and tez-app (Windows needs the VS 20
 .\target\release\tez.exe install --all
 ```
 
-`install --all` downloads PHP 7.4 to 8.6, FrankenPHP, PostgreSQL 17 with TimescaleDB, Redis,
+`install --all` downloads PHP 7.4 to 8.6, the Caddy web server, PostgreSQL 17 with TimescaleDB, Redis,
 Mailpit, Meilisearch and RustFS into `%USERPROFILE%\.tez`, and adds `%USERPROFILE%\.tez\bin` to your
 PATH (open a new terminal afterwards). Without `--all` it installs only the default PHP plus
 PostgreSQL, Redis and Mailpit.
@@ -128,7 +128,7 @@ also has logs, dumps and a config file editor.
 | Part | Source | Notes |
 | --- | --- | --- |
 | PHP 7.4–8.6 | windows.php.net official builds, SHA-256 checked | redis, mongodb and xdebug from PECL; `tez ext install <any>` for the rest |
-| Web server | FrankenPHP 1.14 (Caddy) | local HTTPS CA, HTTP/2, compression, websockets; embedded PHP 8.6 |
+| Web server | Caddy 2.11 | local HTTPS CA, HTTP/2, compression, websockets; runs no PHP itself, every site runs on the official PHP builds |
 | PHP pools | `php-cgi` per version | 6 workers each, restarted if they exit |
 | PostgreSQL 14–18 | EnterpriseDB builds | TimescaleDB (several versions side by side), PostGIS, pgvector, psql, pg_dump |
 | MySQL 8.0/8.4, MariaDB 10.11–12.3 | official zips | root, no password, 127.0.0.1 |
@@ -148,9 +148,9 @@ differs from Windows:
 | Part | macOS / Linux source | Notes |
 | --- | --- | --- |
 | PHP 8.0–8.5 | static-php-cli's prebuilt "bulk" builds (dl.static-php.dev) | One `php` and `php-fpm` per version with ~60 extensions built in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole). Extensions cannot be switched or added per version; PECL add-ons, Xdebug and PHP 7.4 are Windows-only for now |
-| PHP 8.6 | FrankenPHP's own PHP | Web only; no `php` 8.6 command |
+| PHP 8.6 | not published yet as a static build | Sites that need 8.6 run on Windows for now |
 | PHP pools | `php-fpm`, one master per version | `php_workers` children each |
-| Web server | FrankenPHP 1.14 static binary | Intel Macs get plain Caddy (FrankenPHP has no build for them) |
+| Web server | Caddy 2.11 | The same server on every platform |
 | PostgreSQL 14–18 | theseus-rs/postgresql-binaries | TimescaleDB, PostGIS and pgvector are Windows-only for now |
 | Redis | compiled from the source release with `make` | Needs the Xcode Command Line Tools, or `build-essential` on Linux |
 | MariaDB | official bintar | Linux x86_64 only |
@@ -209,6 +209,5 @@ assets/         the web dashboard and the PHP files tez loads into PHP
 ## Not done yet
 
 - Typesense has no Windows build, so it is not offered (Herd for Windows lacks it too).
-- FrankenPHP worker mode (Octane) is available only to sites on PHP 8.6.
 - Pausing Horizon from the dashboard restarts supervisors rather than pausing them in place.
 - Port 80 falls back to 8088 while another program (here, nginx inside WSL) holds it.

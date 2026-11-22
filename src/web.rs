@@ -1,10 +1,7 @@
-//! The web server: one FrankenPHP process (Caddy inside, plus an embedded PHP 8.6) in front of
-//! every site. It serves HTTPS with its own local certificate authority, HTTP/2, compression and
-//! websockets, and passes PHP requests to a pool for the site's version: php-cgi processes on
-//! Windows, a php-fpm master on macOS and Linux. Sites on PHP 8.6 run inside FrankenPHP itself.
-//!
-//! FrankenPHP publishes no build for Intel Macs, so there tez runs plain Caddy (the same server,
-//! without the embedded PHP 8.6).
+//! The web server: one Caddy process in front of every site. It serves HTTPS with its own local
+//! certificate authority, HTTP/2, compression and websockets, and passes PHP requests to a pool
+//! for the site's version: php-cgi processes on Windows, a php-fpm master on macOS and Linux.
+//! Caddy runs no PHP itself: every site, whatever its version, runs on the official PHP builds.
 
 use crate::config::Config;
 use crate::fetch;
@@ -16,70 +13,30 @@ use crate::sys;
 use crate::util::{self, R};
 use std::path::PathBuf;
 
-pub const FRANKENPHP_VERSION: &str = "1.14.0";
 pub const CADDY_VERSION: &str = "2.11.9";
-pub const EMBEDDED_PHP: &str = "8.6";
 pub const ADMIN: &str = "127.0.0.1:2019";
 
-/// FrankenPHP's release asset for this machine, or None where only Caddy runs (Intel Macs).
-fn frankenphp_asset() -> Option<&'static str> {
-    match (sys::os(), sys::arch()) {
-        ("windows", _) => Some("frankenphp-windows-x86_64.zip"),
-        ("linux", "aarch64") => Some("frankenphp-linux-aarch64"),
-        ("linux", _) => Some("frankenphp-linux-x86_64"),
-        ("macos", "aarch64") => Some("frankenphp-mac-arm64"),
-        _ => None,
-    }
+/// Caddy's release archive for this machine.
+fn caddy_asset() -> String {
+    let (os, ext) = match sys::os() { "windows" => ("windows", "zip"), "macos" => ("mac", "tar.gz"), _ => ("linux", "tar.gz") };
+    let arch = if sys::arch() == "aarch64" { "arm64" } else { "amd64" };
+    format!("caddy_{CADDY_VERSION}_{os}_{arch}.{ext}")
 }
 
-/// True when the web server has FrankenPHP's own PHP (so 8.6 sites and `php_server` work).
-pub fn has_embedded_php() -> bool { frankenphp_asset().is_some() }
+pub fn server_dir() -> PathBuf { paths::service_dir("caddy", CADDY_VERSION) }
+pub fn server_exe() -> PathBuf { server_dir().join(sys::exe("caddy")) }
 
-pub fn frankenphp_dir() -> PathBuf {
-    if has_embedded_php() { paths::service_dir("frankenphp", FRANKENPHP_VERSION) } else { paths::service_dir("caddy", CADDY_VERSION) }
-}
-pub fn frankenphp_exe() -> PathBuf { frankenphp_dir().join(sys::exe(if has_embedded_php() { "frankenphp" } else { "caddy" })) }
-
-pub fn install_frankenphp(cfg: &Config) -> R<()> {
-    let dir = frankenphp_dir();
-    if !frankenphp_exe().exists() {
-        match frankenphp_asset() {
-            Some(asset) => {
-                util::step(&format!("Downloading FrankenPHP {FRANKENPHP_VERSION} (web server with embedded PHP {EMBEDDED_PHP})"));
-                let url = format!("https://github.com/php/frankenphp/releases/download/v{FRANKENPHP_VERSION}/{asset}");
-                if cfg!(windows) {
-                    let zip = fetch::download(&url, &format!("frankenphp-windows-x86_64-v{FRANKENPHP_VERSION}.zip"))?;
-                    fetch::extract(&zip, &dir, &[])?;
-                    for ext in ["redis", "mongodb"] {
-                        if let Err(e) = php::pecl_install_into(&dir, EMBEDDED_PHP, ext, true) {
-                            util::warn(&format!("{ext} for the embedded PHP {EMBEDDED_PHP}: {e}"));
-                        }
-                    }
-                } else {
-                    // A single static binary (its PHP has redis, intl, pdo_* and more built in).
-                    let bin = fetch::download(&url, &format!("{asset}-v{FRANKENPHP_VERSION}"))?;
-                    std::fs::create_dir_all(&dir)?;
-                    std::fs::copy(&bin, frankenphp_exe())?;
-                    fetch::make_executable(&frankenphp_exe())?;
-                }
-                util::ok(&format!("FrankenPHP {FRANKENPHP_VERSION}"));
-            }
-            None => {
-                util::step(&format!("Downloading Caddy {CADDY_VERSION} (FrankenPHP has no build for this Mac)"));
-                let file = format!("caddy_{CADDY_VERSION}_mac_amd64.tar.gz");
-                let tgz = fetch::download(&format!("https://github.com/caddyserver/caddy/releases/download/v{CADDY_VERSION}/{file}"), &file)?;
-                fetch::extract(&tgz, &dir, &[])?;
-                fetch::make_executable(&frankenphp_exe())?;
-                util::ok(&format!("Caddy {CADDY_VERSION}"));
-            }
-        }
-    }
-    if has_embedded_php() {
-        std::fs::write(dir.join("php.ini"), php::ini_text(&dir, EMBEDDED_PHP, cfg))?;
-    }
+/// Download Caddy once; later calls return straight away.
+pub fn install_server(_cfg: &Config) -> R<()> {
+    if server_exe().exists() { return Ok(()); }
+    util::step(&format!("Downloading Caddy {CADDY_VERSION} (the web server)"));
+    let file = caddy_asset();
+    let archive = fetch::download(&format!("https://github.com/caddyserver/caddy/releases/download/v{CADDY_VERSION}/{file}"), &file)?;
+    fetch::extract(&archive, &server_dir(), &[])?;
+    fetch::make_executable(&server_exe())?;
+    util::ok(&format!("Caddy {CADDY_VERSION}"));
     Ok(())
 }
-
 /// php-cgi listens on 9000 + major*100 + minor*10 + n, so 8.4 uses 9840, 9841, ...
 pub fn cgi_port(minor: &str, n: u16) -> u16 {
     let mut it = minor.split('.').map(|x| x.parse::<u16>().unwrap_or(0));
@@ -113,7 +70,6 @@ fn write_fpm_conf(minor: &str, cfg: &Config) -> PathBuf {
 pub fn cgi_specs(cfg: &Config) -> Vec<Spec> {
     let mut out = Vec::new();
     for minor in sites::needed_php(cfg) {
-        if minor == EMBEDDED_PHP && has_embedded_php() { continue; }
         if !cfg!(windows) {
             let conf = write_fpm_conf(&minor, cfg);
             let dir = paths::php_dir(&minor);
@@ -182,7 +138,6 @@ pub fn caddyfile(cfg: &Config) -> String {
     s.push_str(&format!("\thttp_port {http}\n\thttps_port {https}\n"));
     s.push_str("\tlocal_certs\n\tskip_install_trust\n\tauto_https disable_redirects\n");
     s.push_str(&format!("\tstorage file_system \"{}\"\n", paths::fwd(&paths::caddy_storage())));
-    if has_embedded_php() { s.push_str("\tfrankenphp\n"); }
     s.push_str("\tlog {\n\t\tlevel WARN\n\t}\n}\n\n");
 
     // The dashboard.
@@ -215,9 +170,7 @@ pub fn caddyfile(cfg: &Config) -> String {
         ));
         s.push_str(&format!("\troot * \"{}\"\n", paths::fwd(&site.root)));
         s.push_str("\tencode zstd gzip\n");
-        if site.php == EMBEDDED_PHP && has_embedded_php() {
-            s.push_str("\tphp_server\n");
-        } else if php::is_installed(&site.php) {
+        if php::is_installed(&site.php) {
             let ups = cgi_upstreams(&site.php, cfg);
             s.push_str(&format!("\tphp_fastcgi {} {{\n", ups.join(" ")));
             s.push_str("\t\tlb_policy least_conn\n\t\tlb_try_duration 30s\n\t\tlb_try_interval 50ms\n\t\tdial_timeout 2s\n\t\tread_timeout 300s\n\t}\n");
@@ -241,11 +194,10 @@ pub fn write_caddyfile(cfg: &Config) -> R<bool> {
 
 pub fn spec(cfg: &Config) -> Spec {
     let (http, https, _) = effective_ports(cfg);
-    let exe = frankenphp_exe();
+    let exe = server_exe();
     Spec::new("web", "web", exe.clone())
         .args(["run".to_string(), "--config".into(), paths::fwd(&paths::caddyfile()), "--adapter".into(), "caddyfile".into()])
-        .cwd(frankenphp_dir())
-        .env("PHPRC", frankenphp_dir().display().to_string())
+        .cwd(server_dir())
         .env("XDG_DATA_HOME", paths::caddy_storage().display().to_string())
         .port(https)
         .url(format!("http://127.0.0.1:{http}"))
@@ -254,9 +206,8 @@ pub fn spec(cfg: &Config) -> Spec {
 
 /// Apply a changed Caddyfile to the running server without dropping connections.
 pub fn reload() -> R<()> {
-    let out = std::process::Command::new(frankenphp_exe())
+    let out = std::process::Command::new(server_exe())
         .args(["reload", "--config", &paths::fwd(&paths::caddyfile()), "--adapter", "caddyfile", "--address", ADMIN])
-        .env("PHPRC", frankenphp_dir().display().to_string())
         .output()?;
     if !out.status.success() {
         crate::bail!("web reload failed: {}", String::from_utf8_lossy(&out.stderr).trim());

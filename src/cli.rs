@@ -331,7 +331,7 @@ fn install(rest: &[&str]) -> R<()> {
     for v in &want_php {
         if !php::is_installed(v) { php::install(v, &cfg)?; } else { php::write_ini(v, &cfg)?; }
     }
-    web::install_frankenphp(&cfg)?;
+    web::install_server(&cfg)?;
     for (name, sc) in cfg.services.clone() {
         let version = if sc.version.is_empty() { services::info(&name)?.version.to_string() } else { sc.version.clone() };
         if sc.enabled && !services::is_installed(&name, &version) { services::install(&name, Some(&version))?; }
@@ -478,7 +478,7 @@ fn php_list() -> R<()> {
             None if !php::available_minors().contains(minor) => dim(&format!("no {} build", sys::os())),
             None => dim(&format!("{latest} available")),
         };
-        let embedded = if *minor == web::EMBEDDED_PHP && web::frankenphp_exe().exists() { dim("  + embedded in FrankenPHP") } else { String::new() };
+        let embedded = String::new();
         println!("  {minor:<5} {state}{mark}{embedded}");
     }
     Ok(())
@@ -538,7 +538,7 @@ fn isolate(v: Option<&str>, site: Option<&str>) -> R<()> {
     match v {
         Some(v) => {
             let v = php::normalize(v)?;
-            if !php::is_installed(&v) && v != web::EMBEDDED_PHP { php::install(&v, &cfg)?; }
+            if !php::is_installed(&v) { php::install(&v, &cfg)?; }
             cfg.site_mut(&name).php = Some(v.clone());
             cfg.save()?;
             util::ok(&format!("{name} uses PHP {v}"));

@@ -59,7 +59,7 @@ pub fn settings_set(shared: &Shared, body: &Value) -> R<Value> {
     let restart_web = body.get("http_port").is_some() || body.get("https_port").is_some();
     cfg.save()?;
     php::write_all_inis(&cfg)?;
-    let _ = web::install_frankenphp(&cfg);
+    let _ = web::install_server(&cfg);
     let notes = daemon::reload(shared)?;
     if restart_php { shared.lock().unwrap().restart("php"); }
     if restart_web { shared.lock().unwrap().restart("web"); }
@@ -213,7 +213,7 @@ pub fn php_set(shared: &Shared, minor: &str, body: &Value) -> R<Value> {
     }
     cfg.save()?;
     php::write_all_inis(&cfg)?;
-    let _ = web::install_frankenphp(&cfg);
+    let _ = web::install_server(&cfg);
     // php -v with the new ini catches mistakes before the workers restart.
     let check_minor = if all { cfg.default_php.clone() } else { minor.clone() };
     let check = Command::new(php::php_exe(&check_minor)).arg("-v").hidden().output()?;
@@ -427,7 +427,7 @@ pub fn site_set(shared: &Shared, name: &str, body: &Value) -> R<Value> {
     let wants_php = entry.php.clone();
     cfg.save()?;
     if let Some(v) = wants_php {
-        if !php::is_installed(&v) && v != web::EMBEDDED_PHP {
+        if !php::is_installed(&v) {
             return Ok(json!({ "ok": true, "job": start_job(&["php".into(), "install".into(), v.clone()], None, &format!("Install PHP {v}"))? }));
         }
     }

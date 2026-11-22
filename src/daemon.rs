@@ -234,7 +234,9 @@ pub fn plan(cfg: &Config) -> R<(Vec<Spec>, Vec<String>)> {
         match services::spec(name, sc) { Ok(s) => specs.push(s), Err(e) => notes.push(format!("{name}: {e}")) }
     }
     specs.extend(web::cgi_specs(cfg));
-    if web::frankenphp_exe().exists() {
+    // Fetch the web server once if it is missing (first run, or after the switch to plain Caddy).
+    if !web::server_exe().exists() { if let Err(e) = web::install_server(cfg) { notes.push(format!("web server: {e}")); } }
+    if web::server_exe().exists() {
         web::write_caddyfile(cfg)?;
         let (_, _, port_notes) = web::effective_ports(cfg);
         notes.extend(port_notes);
