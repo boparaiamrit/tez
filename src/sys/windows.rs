@@ -431,3 +431,164 @@ pub fn system_cpu_times() -> Option<(u64, u64)> {
 
 /// Only used where `system_cpu_times` is unavailable (macOS).
 pub fn system_cpu_percent() -> Option<f64> { None }
+
+// ------------------------------------------------------------------ the Recycle Bin
+
+const FO_DELETE: u32 = 3;
+const FOF_SILENT: u16 = 0x0004;
+const FOF_NOCONFIRMATION: u16 = 0x0010;
+const FOF_ALLOWUNDO: u16 = 0x0040;
+const FOF_NOERRORUI: u16 = 0x0400;
+/// If Windows would delete outright instead of recycling (the bin is too small, say), it asks
+/// first rather than deleting silently. tez checks those cases before; this is the last guard.
+const FOF_WANTNUKEWARNING: u16 = 0x4000;
+const DRIVE_FIXED: u32 = 3;
+const COINIT_APARTMENTTHREADED: u32 = 0x2;
+const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+
+/// SHFILEOPSTRUCTW, natural alignment on 64-bit Windows.
+#[repr(C)]
+struct ShFileOp {
+    hwnd: *mut c_void,
+    func: u32,
+    from: *const u16,
+    to: *const u16,
+    flags: u16,
+    aborted: i32,
+    name_mappings: *mut c_void,
+    progress_title: *const u16,
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHFileOperationW(op: *mut ShFileOp) -> i32;
+}
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
+    fn CoUninitialize();
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetDriveTypeW(root: *const u16) -> u32;
+    fn GetVolumePathNameW(path: *const u16, out: *mut u16, len: u32) -> i32;
+    fn GetVolumeNameForVolumeMountPointW(mount: *const u16, out: *mut u16, len: u32) -> i32;
+}
+
+/// A path as Windows APIs want it: no `\\?\` prefix, NUL-terminated UTF-16.
+fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    let s = path.to_string_lossy().to_string();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The root of the volume holding `path` ("C:\", or a mount folder), NUL-terminated.
+fn volume_root(path: &std::path::Path) -> Option<Vec<u16>> {
+    let p = wide_path(path);
+    let mut out = vec![0u16; 1024];
+    // SAFETY: `p` is NUL-terminated; `out` has room for 1024 UTF-16 units, the length we pass.
+    let ok = unsafe { GetVolumePathNameW(p.as_ptr(), out.as_mut_ptr(), out.len() as u32) };
+    if ok == 0 { return None; }
+    let n = out.iter().position(|c| *c == 0).unwrap_or(out.len());
+    out.truncate(n);
+    out.push(0);
+    Some(out)
+}
+
+/// "{GUID}" of the volume whose root is `root` (NUL-terminated, with a trailing backslash).
+fn volume_guid(root: &[u16]) -> Option<String> {
+    let mut out = vec![0u16; 64];
+    // SAFETY: `root` is NUL-terminated; `out` holds 64 units, which a volume GUID path fits in.
+    let ok = unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), out.as_mut_ptr(), out.len() as u32) };
+    if ok == 0 { return None; }
+    let s = String::from_utf16_lossy(&out[..out.iter().position(|c| *c == 0).unwrap_or(out.len())]);
+    let start = s.find('{')?;
+    let end = s[start..].find('}')? + start;
+    Some(s[start..=end].to_string())
+}
+
+/// A DWORD under HKCU, read with reg.exe (no window).
+fn reg_dword(key: &str, value: &str) -> Option<u64> {
+    let out = Command::new(crate::paths::system32("reg.exe")).args(["query", key, "/v", value])
+        .creation_flags(CREATE_NO_WINDOW).stdin(std::process::Stdio::null()).output().ok()?;
+    if !out.status.success() { return None; }
+    parse_reg_dword(&String::from_utf8_lossy(&out.stdout), value)
+}
+
+/// The value in reg.exe's output line "    MaxCapacity    REG_DWORD    0x3e8".
+pub fn parse_reg_dword(text: &str, value: &str) -> Option<u64> {
+    text.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        if it.next()? != value || it.next()? != "REG_DWORD" { return None; }
+        u64::from_str_radix(it.next()?.trim_start_matches("0x"), 16).ok()
+    })
+}
+
+/// Whether `path` (`size` bytes) can go to the Recycle Bin, or why not. Network and removable
+/// drives have no Recycle Bin, and a bin that is off or too small means Windows deletes outright,
+/// which tez never does.
+pub fn trash_check(path: &std::path::Path, size: u64) -> Result<&'static str, String> {
+    let root = volume_root(path).ok_or_else(|| "Windows could not tell which drive it is on".to_string())?;
+    // SAFETY: `root` is NUL-terminated.
+    let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+    if kind != DRIVE_FIXED { return Err("it is on a network or removable drive, which has no Recycle Bin".into()); }
+    if let Some(guid) = volume_guid(&root) {
+        let key = format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+        if reg_dword(&key, "NukeOnDelete") == Some(1) {
+            return Err("the Recycle Bin is turned off for this drive, so Windows would delete it outright".into());
+        }
+        if let Some(mb) = reg_dword(&key, "MaxCapacity") {
+            if size > mb << 20 {
+                return Err(format!(
+                    "it is {} and this drive's Recycle Bin holds {}, so Windows would delete it outright",
+                    crate::util::human_bytes(size),
+                    crate::util::human_bytes(mb << 20)
+                ));
+            }
+        }
+    }
+    Ok("Recycle Bin")
+}
+
+/// Move a folder to the Recycle Bin. Never deletes outright: after `trash_check`, Windows
+/// recycles it, and if it still would not, it asks (FOF_WANTNUKEWARNING) instead of deleting.
+pub fn move_to_trash(path: &std::path::Path) -> crate::util::R<&'static str> {
+    let mut from = wide_path(path);
+    if from.len() > 260 { crate::bail!("the path is longer than the 260 characters the Recycle Bin accepts"); }
+    from.push(0); // a list of paths ends with a second NUL
+    let mut op = ShFileOp {
+        hwnd: std::ptr::null_mut(),
+        func: FO_DELETE,
+        from: from.as_ptr(),
+        to: std::ptr::null(),
+        flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING,
+        aborted: 0,
+        name_mappings: std::ptr::null_mut(),
+        progress_title: std::ptr::null(),
+    };
+    // SAFETY: COM is initialised on this thread for the shell call and released afterwards (only
+    // when this call initialised it); `op` and `from` (double-NUL-terminated) outlive the call.
+    let rc = unsafe {
+        let init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let rc = SHFileOperationW(&mut op);
+        if init >= 0 { CoUninitialize(); }
+        rc
+    };
+    if rc != 0 { crate::bail!("{}", shfileop_error(rc)); }
+    if op.aborted != 0 { crate::bail!("Windows stopped before recycling it"); }
+    if path.exists() { crate::bail!("Windows reported success but the folder is still there"); }
+    Ok("Recycle Bin")
+}
+
+/// SHFileOperation's error codes, in words.
+fn shfileop_error(rc: i32) -> String {
+    match rc {
+        5 | 0x78 => "Windows denied access to it or to something inside it".into(),
+        32 | 33 => "a program is using a file in it (an editor, terminal or Explorer window open there?)".into(),
+        0x7C | 0x402 => "Windows could not find it".into(),
+        0x75 => "it was cancelled".into(),
+        _ => format!("Windows error {rc:#x}"),
+    }
+}

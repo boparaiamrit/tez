@@ -77,6 +77,7 @@ pub fn all(cfg: &Config) -> Vec<Site> {
         for dir in dirs {
             let raw = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             if raw.starts_with('.') || raw.starts_with('_') { continue; }
+            if cfg.hidden_sites.iter().any(|h| same_path(Path::new(h), &dir)) { continue; }
             let name = util::host_label(&raw);
             if name.is_empty() || out.iter().any(|s| s.name == name) { continue; }
             out.push(make(cfg, name, dir, false));
@@ -89,6 +90,24 @@ pub fn all(cfg: &Config) -> Vec<Site> {
 }
 
 pub const RESERVED: &[&str] = &["tez"];
+
+/// A path for comparing: forward slashes, no `\\?\` prefix or trailing separator, and
+/// lower case on Windows, where paths are case-insensitive.
+fn norm(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s).trim_end_matches('/').to_string();
+    if cfg!(windows) { s.to_ascii_lowercase() } else { s }
+}
+
+/// Two paths name the same folder.
+pub fn same_path(a: &Path, b: &Path) -> bool { norm(a) == norm(b) }
+
+/// `inner` is `outer` or somewhere below it. Everything is within the root `/` (which `norm`
+/// turns into an empty string).
+pub fn is_within(inner: &Path, outer: &Path) -> bool {
+    let (i, o) = (norm(inner), norm(outer));
+    i == o || o.is_empty() || i.starts_with(&format!("{o}/"))
+}
 
 pub fn find(cfg: &Config, name: &str) -> Option<Site> { all(cfg).into_iter().find(|s| s.name == name) }
 

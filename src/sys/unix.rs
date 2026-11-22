@@ -276,6 +276,92 @@ pub fn system_cpu_times() -> Option<(u64, u64)> {
     None
 }
 
+// ------------------------------------------------------------------ the Trash
+
+/// The user's Trash folder: ~/.Trash on macOS; on Linux the freedesktop one,
+/// $XDG_DATA_HOME/Trash (~/.local/share/Trash), whose files/ and info/ hold each item.
+fn trash_dir() -> std::path::PathBuf {
+    let home = crate::paths::user_home();
+    if cfg!(target_os = "macos") { return home.join(".Trash"); }
+    match std::env::var("XDG_DATA_HOME") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d).join("Trash"),
+        _ => home.join(".local").join("share").join("Trash"),
+    }
+}
+
+/// The device a path (or its nearest existing parent) lives on.
+fn device_of(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut p = path.to_path_buf();
+    loop {
+        if let Ok(m) = std::fs::metadata(&p) { return Some(m.dev()); }
+        if !p.pop() { return None; }
+    }
+}
+
+fn has_gio() -> bool {
+    cfg!(target_os = "linux") && Command::new("gio").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Whether `path` can go to the Trash, or why not. A rename into the Trash only works on the same
+/// disk; on Linux `gio trash` handles other disks (their own .Trash-<uid> folder).
+pub fn trash_check(path: &std::path::Path, _size: u64) -> Result<&'static str, String> {
+    let same_disk = device_of(path).is_some() && device_of(path) == device_of(&trash_dir());
+    if same_disk || has_gio() { Ok("Trash") } else { Err("it is on another disk than your Trash".into()) }
+}
+
+/// Percent-encoding for a .trashinfo Path= line (freedesktop spec: an escaped absolute path).
+pub fn trash_url_path(path: &str) -> String {
+    let mut out = String::new();
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) { out.push(b as char); } else { out.push_str(&format!("%{b:02X}")); }
+    }
+    out
+}
+
+/// A name not yet taken in `dir`: "app", then "app 2", "app 3"... (macOS) or "app.2"... (Linux).
+fn free_name(dir: &std::path::Path, base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !dir.join(base).exists() && !taken(base) { return base.to_string(); }
+    for n in 2..10_000 {
+        let name = if cfg!(target_os = "macos") { format!("{base} {n}") } else { format!("{base}.{n}") };
+        if !dir.join(&name).exists() && !taken(&name) { return name; }
+    }
+    format!("{base}.{}", std::process::id())
+}
+
+/// Move a folder to the Trash, never deleting it. A failed move changes nothing.
+pub fn move_to_trash(path: &std::path::Path) -> crate::util::R<&'static str> {
+    let trash = trash_dir();
+    let base = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "site".into());
+    let same_disk = device_of(path).is_some() && device_of(path) == device_of(&trash);
+    if !same_disk {
+        if !has_gio() { crate::bail!("it is on another disk than your Trash"); }
+        let out = Command::new("gio").arg("trash").arg(path).stdin(Stdio::null()).output()?;
+        if !out.status.success() { crate::bail!("gio trash failed: {}", String::from_utf8_lossy(&out.stderr).trim()); }
+        if path.exists() { crate::bail!("gio reported success but the folder is still there"); }
+        return Ok("Trash");
+    }
+    if cfg!(target_os = "macos") {
+        std::fs::create_dir_all(&trash)?;
+        let name = free_name(&trash, &base, |_| false);
+        std::fs::rename(path, trash.join(name))?;
+        return Ok("Trash");
+    }
+    let (files, info) = (trash.join("files"), trash.join("info"));
+    std::fs::create_dir_all(&files)?;
+    std::fs::create_dir_all(&info)?;
+    let name = free_name(&files, &base, |n| info.join(format!("{n}.trashinfo")).exists());
+    let info_file = info.join(format!("{name}.trashinfo"));
+    let text = format!("[Trash Info]\nPath={}\nDeletionDate={}\n", trash_url_path(&path.to_string_lossy()), crate::util::utc_now().replace(' ', "T"));
+    // The record first (created exclusively), then the move; a failed move takes the record back.
+    std::fs::OpenOptions::new().write(true).create_new(true).open(&info_file).and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))?;
+    if let Err(e) = std::fs::rename(path, files.join(&name)) {
+        let _ = std::fs::remove_file(&info_file);
+        return Err(e.into());
+    }
+    Ok("Trash")
+}
+
 /// macOS: whole-machine CPU percent from one `ps` call (all processes' %cpu over the cores).
 pub fn system_cpu_percent() -> Option<f64> {
     if !cfg!(target_os = "macos") { return None; }

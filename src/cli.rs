@@ -68,6 +68,9 @@ fn dispatch(args: &[String]) -> R<()> {
         ["unlink"] => unlink(None),
         ["unlink", name] => unlink(Some(name)),
         ["sites"] | ["links"] | ["parked"] => sites_list(),
+        ["site", "rm", name, flags @ ..] | ["site", "remove", name, flags @ ..] => site_rm(name, flags),
+        ["site", "hidden"] => site_hidden(),
+        ["site", "unhide", which] => site_unhide(which),
         ["domain", "add", host] => domain(true, host, None),
         ["domain", "add", host, site] => domain(true, host, Some(site)),
         ["domain", "remove", host] => domain(false, host, None),
@@ -132,6 +135,10 @@ Sites (folders in ~/Sites are served at https://<folder>.test)
   tez park [dir] | unpark [dir]         serve every folder inside dir
   tez link [name] | unlink [name]       serve the current folder
   tez sites                             list sites with PHP versions and URLs
+  tez site rm <name> [--files] [--database] [--yes]
+                                        stop serving a site; --files moves its folder to the
+                                        Recycle Bin/Trash, --database drops its local database
+  tez site hidden | unhide <name|path>  sites removed from tez whose folders remain
   tez domain add admin.app.test [site]  extra domains for multi-domain apps (remove to undo)
   tez trust                             trust HTTPS and add hosts entries (asks for admin once)
   tez web [use caddy|nginx]             the web server in front of every site (Caddy by default)
@@ -730,6 +737,83 @@ fn unlink(name: Option<&str>) -> R<()> {
     reload_if_running()
 }
 
+/// `tez site rm <name> [--files] [--database] [--yes]`: through the daemon when it runs (so it
+/// stops the site's processes), else directly.
+fn site_rm(name: &str, flags: &[&str]) -> R<()> {
+    for f in flags {
+        if !matches!(*f, "--files" | "--database" | "--yes" | "-y") { bail!("unknown option {f} (use --files, --database, --yes)"); }
+    }
+    let files = flags.contains(&"--files");
+    let database = flags.contains(&"--database");
+    let yes = flags.contains(&"--yes") || flags.contains(&"-y");
+    let daemon = api::running();
+    let pv: serde_json::Value = if daemon {
+        serde_json::from_str(&api::call("GET", &format!("/api/site/{name}/delete-preview"))?)?
+    } else {
+        crate::remove::preview(&Config::load(), None, name)?
+    };
+    let path = pv["path"].as_str().unwrap_or_default().to_string();
+    let trash = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+    if files && pv["exists"].as_bool().unwrap_or(false) {
+        if let Some(why) = pv["trash_blocked"].as_str() { bail!("tez will not move {path} to the {trash}: {why}. Nothing was changed."); }
+        let more = if pv["size_partial"].as_bool().unwrap_or(false) { "+" } else { "" };
+        util::step(&format!("{path} ({}{more})", util::human_bytes(pv["size_bytes"].as_u64().unwrap_or(0))));
+        if pv["git_dirty"].as_bool().unwrap_or(false) { util::warn(&format!("it has work that exists nowhere else: {}", pv["git_detail"].as_str().unwrap_or_default())); }
+    }
+    let confirm = if (files || database) && !yes {
+        let mut what = if files { format!("move {path} to the {trash}") } else { String::new() };
+        if database {
+            let db = pv["database"]["name"].as_str().unwrap_or("its database");
+            what = if what.is_empty() { format!("drop the database {db}") } else { format!("{what} and drop the database {db}") };
+        }
+        print!("Type the site name to {what}: ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let typed = line.trim().to_string();
+        if typed != name { bail!("that is not {name}; nothing was removed"); }
+        typed
+    } else if files || database {
+        name.to_string()
+    } else {
+        String::new()
+    };
+    let body = serde_json::json!({ "files": files, "database": database, "confirm": confirm });
+    let res: serde_json::Value = if daemon {
+        serde_json::from_str(&api::call_json("POST", &format!("/api/site/{name}/delete"), &body)?)?
+    } else {
+        crate::remove::delete(None, name, &body)?
+    };
+    util::ok(res["removed"].as_str().unwrap_or("removed"));
+    for n in res["notes"].as_array().into_iter().flatten() { util::warn(n.as_str().unwrap_or_default()); }
+    Ok(())
+}
+
+/// `tez site hidden`: folders removed from tez that are still on disk.
+fn site_hidden() -> R<()> {
+    let v = crate::remove::hidden_list(&Config::load());
+    let list = v["hidden"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() { util::ok("no hidden sites"); return Ok(()); }
+    for h in list {
+        let gone = if h["exists"].as_bool().unwrap_or(false) { String::new() } else { dim(" (folder gone)") };
+        println!("  {:<28} {}{gone}", h["name"].as_str().unwrap_or_default(), h["path"].as_str().unwrap_or_default());
+    }
+    println!("{}", dim("serve one again with: tez site unhide <name|path>"));
+    Ok(())
+}
+
+/// `tez site unhide <name|path>`.
+fn site_unhide(which: &str) -> R<()> {
+    let res: serde_json::Value = if api::running() {
+        serde_json::from_str(&api::call_json("POST", "/api/sites/unhide", &serde_json::json!({ "path": which }))?)?
+    } else {
+        crate::remove::unhide(None, which)?
+    };
+    let name = res["name"].as_str().unwrap_or(which);
+    util::ok(&format!("tez serves {name} again"));
+    Ok(())
+}
+
 fn sites_list() -> R<()> {
     let cfg = Config::load();
     let list = sites::all(&cfg);
@@ -1047,12 +1131,34 @@ fn domain(add: bool, host: &str, site: Option<&str>) -> R<()> {
 }
 
 fn missing_hosts(cfg: &Config) -> Vec<String> {
+    let present = hosts_file_names();
+    wanted_hosts(cfg).into_iter().filter(|h| !present.contains(h)).collect()
+}
+
+/// Every host name the hosts file maps (not commented out), lower case.
+pub fn hosts_file_names() -> Vec<String> {
     let text = std::fs::read_to_string(hosts_file()).unwrap_or_default().to_ascii_lowercase();
-    let present: Vec<String> = text.lines()
+    text.lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .flat_map(|l| l.split_whitespace().skip(1).map(|s| s.to_string()).collect::<Vec<_>>())
-        .collect();
-    wanted_hosts(cfg).into_iter().filter(|h| !present.contains(h)).collect()
+        .collect()
+}
+
+/// Names in tez's block of the hosts file that no site uses any more (a removed site).
+fn stale_hosts(cfg: &Config) -> Vec<String> {
+    let text = std::fs::read_to_string(hosts_file()).unwrap_or_default().to_ascii_lowercase();
+    let wanted = wanted_hosts(cfg);
+    let mut inside = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l == "# tez-begin" { inside = true; continue; }
+        if l == "# tez-end" { inside = false; continue; }
+        if inside && !l.starts_with('#') {
+            out.extend(l.split_whitespace().skip(1).filter(|h| !wanted.iter().any(|w| w == h)).map(|h| h.to_string()));
+        }
+    }
+    out
 }
 
 fn hosts_hint(cfg: &Config) {
@@ -1087,7 +1193,7 @@ fn write_hosts_block(cfg: &Config) -> R<()> {
 
 fn hosts(elevated: bool) -> R<()> {
     let cfg = Config::load();
-    if missing_hosts(&cfg).is_empty() && !elevated { util::ok("hosts file already has every site"); return Ok(()); }
+    if missing_hosts(&cfg).is_empty() && stale_hosts(&cfg).is_empty() && !elevated { util::ok("hosts file already has every site"); return Ok(()); }
     if sys::is_elevated() {
         write_hosts_block(&cfg)?;
         util::ok("hosts file updated");

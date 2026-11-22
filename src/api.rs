@@ -178,6 +178,11 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
                 Err(e) => json_err(&mut stream, 500, &e.to_string()),
             }
         }
+        // ---- removing a site (see remove.rs)
+        ("GET", ["api", "site", name, "delete-preview"]) => reply(&mut stream, crate::remove::preview(&Config::load(), Some(&shared), name)),
+        ("POST", ["api", "site", name, "delete"]) => reply(&mut stream, body_json(&req).and_then(|b| crate::remove::delete(Some(&shared), name, &b))),
+        ("GET", ["api", "sites", "hidden"]) => json_ok(&mut stream, crate::remove::hidden_list(&Config::load())),
+        ("POST", ["api", "sites", "unhide"]) => reply(&mut stream, body_json(&req).and_then(|b| crate::remove::unhide(Some(&shared), b["path"].as_str().unwrap_or_default()))),
         ("GET", ["api", "logs", name @ ..]) => {
             let n = query_param(&req.query, "n").and_then(|v| v.parse().ok()).unwrap_or(200usize);
             let name = name.join("/");
@@ -298,11 +303,21 @@ pub fn call(method: &str, path: &str) -> R<String> {
     call_port(cfg.api_port, method, path, Duration::from_secs(120))
 }
 
+/// Call the running daemon with a JSON body. Returns the response body.
+pub fn call_json(method: &str, path: &str, body: &serde_json::Value) -> R<String> {
+    let cfg = Config::load();
+    call_body(cfg.api_port, method, path, &body.to_string(), Duration::from_secs(300))
+}
+
 pub fn call_port(port: u16, method: &str, path: &str, timeout: Duration) -> R<String> {
+    call_body(port, method, path, "", timeout)
+}
+
+fn call_body(port: u16, method: &str, path: &str, body: &str, timeout: Duration) -> R<String> {
     let mut s = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(400))
         .map_err(|_| "tez is not running (start it with `tez start`)".to_string())?;
     s.set_read_timeout(Some(timeout))?;
-    write!(s, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Tez: cli\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+    write!(s, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Tez: cli\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf)?;
     let text = String::from_utf8_lossy(&buf).to_string();

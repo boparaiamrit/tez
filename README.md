@@ -103,6 +103,32 @@ of every account signed in to the GitHub CLI and its organisations. It clones th
 SSH alias from `~/.ssh/config` (for example `github.com-work`) or through gh over HTTPS, then runs
 `tez setup`. Any git URL works too. Tokens stay in gh's store; tez never keeps them.
 
+### Removing a site
+
+```powershell
+tez site rm myapp                    # stop serving it; the folder stays
+tez site rm myapp --files            # also move the folder to the Recycle Bin (type the name to confirm)
+tez site rm myapp --database         # also drop its database on tez's own server (type the name)
+tez site hidden                      # sites removed from tez whose folders remain
+tez site unhide myapp                # serve one again
+```
+
+Either way, the site's processes (Horizon, Reverb, Vite, the scheduler) stop, its tez settings
+go, and the web server stops serving it. Removing it from tez unlinks a linked site, and hides a
+folder in your Sites folder without touching it.
+
+`--files` moves the folder to the Recycle Bin on Windows, or the Trash on macOS and Linux. tez
+never deletes a folder outright. It refuses when the move would not be recoverable: a network or
+removable drive, a Recycle Bin that is off or too small, or a folder on another disk than the Trash.
+It also refuses for a Sites folder, your home folder, a drive, a link, or a folder that holds
+other sites. If anything has the folder open, such as a terminal or an editor, nothing is moved and
+the site is put back as it was.
+
+`--database` drops the database named in the site's `.env`, and its `_testing` twin, only when it
+is on a PostgreSQL, MySQL or MariaDB that tez runs here. A database on another host is never
+touched. Both options need the site's name typed back, because a dropped database cannot be
+recovered.
+
 ## The desktop app
 
 `tez-app` is a native window built with [GPUI Kit](https://gpui-kit.com), plus a tray icon (the

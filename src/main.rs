@@ -16,6 +16,7 @@ mod nginx;
 mod paths;
 mod php;
 mod project;
+mod remove;
 mod services;
 mod shim;
 mod sites;

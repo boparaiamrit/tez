@@ -27,6 +27,8 @@ pub struct Config {
     pub parked: Vec<String>,
     /// Single linked sites: name -> folder.
     pub links: BTreeMap<String, String>,
+    /// Folders inside a parked path that tez does not serve ("removed from tez"; the folder stays).
+    pub hidden_sites: Vec<String>,
     /// Per-site settings, for parked and linked sites alike.
     pub sites: BTreeMap<String, SiteSettings>,
     pub services: BTreeMap<String, ServiceConfig>,
@@ -81,6 +83,7 @@ impl Default for Config {
             extensions: Vec::new(),
             parked: vec![sites_dir],
             links: BTreeMap::new(),
+            hidden_sites: Vec::new(),
             sites: BTreeMap::new(),
             services: BTreeMap::new(),
             php_ini: BTreeMap::new(),
