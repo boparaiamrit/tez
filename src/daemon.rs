@@ -12,12 +12,13 @@ use crate::util::R;
 use crate::web;
 use std::fs::OpenOptions;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum State { Starting, Running, Backoff, Stopped, Failed }
+pub enum State { Starting, Running, Backoff, Stopping, Stopped, Failed }
 
 pub struct Proc {
     pub spec: Spec,
@@ -30,11 +31,16 @@ pub struct Proc {
     pub last_exit: Option<String>,
     /// False once the user stops it by hand; the daemon then leaves it alone.
     pub wanted: bool,
+    /// Set while its stop runs on another thread (true until the process has exited), so the
+    /// daemon lock is never held while a service shuts down.
+    stopping: Option<Arc<AtomicBool>>,
+    /// No longer in the plan: dropped from the list once it has stopped.
+    retired: bool,
 }
 
 impl Proc {
     fn new(spec: Spec) -> Proc {
-        Proc { spec, child: None, job: None, state: State::Stopped, restarts: 0, started: None, next_start: Some(Instant::now()), last_exit: None, wanted: true }
+        Proc { spec, child: None, job: None, state: State::Stopped, restarts: 0, started: None, next_start: Some(Instant::now()), last_exit: None, wanted: true, stopping: None, retired: false }
     }
     pub fn pid(&self) -> Option<u32> { self.child.as_ref().map(|c| c.id()) }
     pub fn uptime(&self) -> u64 { self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0) }
@@ -121,25 +127,57 @@ fn stop(p: &mut Proc) {
     p.started = None;
 }
 
+/// Stop a process without holding the daemon lock: its child moves to a thread that runs the stop
+/// command and waits, while this entry shows Stopping. `tick` finishes up once it has exited, and
+/// starts it again if it is still wanted.
+fn stop_async(p: &mut Proc) {
+    if p.stopping.is_some() { return; }
+    p.started = None;
+    if p.child.is_none() {
+        sys::kill_tree(p.job.take(), None);
+        p.state = State::Stopped;
+        return;
+    }
+    let mut husk = Proc::new(p.spec.clone());
+    husk.child = p.child.take();
+    husk.job = p.job.take();
+    let flag = Arc::new(AtomicBool::new(true));
+    p.stopping = Some(flag.clone());
+    p.state = State::Stopping;
+    std::thread::spawn(move || {
+        stop(&mut husk);
+        flag.store(false, Ordering::SeqCst);
+    });
+}
+
 impl Daemon {
-    /// Make the running set match `desired`: start new, stop removed, restart changed.
+    /// Make the running set match `desired`: start new, stop removed, restart changed. Stops run in
+    /// the background, so this returns at once.
     pub fn reconcile(&mut self, desired: Vec<Spec>) {
         let names: Vec<String> = desired.iter().map(|s| s.name.clone()).collect();
-        let mut i = 0;
-        while i < self.procs.len() {
-            if !names.contains(&self.procs[i].spec.name) {
-                let mut p = self.procs.remove(i);
-                stop(&mut p);
-            } else { i += 1; }
+        for p in self.procs.iter_mut() {
+            if !p.retired && !names.contains(&p.spec.name) {
+                p.retired = true;
+                p.wanted = false;
+                stop_async(p);
+            }
         }
         for spec in desired {
             match self.procs.iter_mut().find(|p| p.spec.name == spec.name) {
-                Some(p) if p.spec == spec => {}
                 Some(p) => {
-                    stop(p);
-                    p.spec = spec;
-                    p.restarts = 0;
-                    if p.wanted { p.next_start = Some(Instant::now()); }
+                    // Back in the plan while it was still stopping: start it again once stopped.
+                    if p.retired {
+                        p.retired = false;
+                        p.wanted = true;
+                        p.restarts = 0;
+                        p.next_start = Some(Instant::now());
+                    }
+                    if p.spec != spec {
+                        stop_async(p);
+                        p.spec = spec;
+                        p.restarts = 0;
+                        if p.wanted { p.next_start = Some(Instant::now()); }
+                    }
                 }
                 None => self.procs.push(Proc::new(spec)),
             }
@@ -154,7 +192,16 @@ impl Daemon {
 
     pub fn tick(&mut self) {
         let now = Instant::now();
+        // Finish stops that ran in the background; drop what left the plan.
         for p in self.procs.iter_mut() {
+            if p.stopping.as_ref().is_some_and(|f| !f.load(Ordering::SeqCst)) {
+                p.stopping = None;
+                p.state = State::Stopped;
+            }
+        }
+        self.procs.retain(|p| !(p.retired && p.stopping.is_none()));
+        for p in self.procs.iter_mut() {
+            if p.stopping.is_some() { continue; }
             if let Some(child) = p.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
                     let ran = p.started.map(|s| s.elapsed()).unwrap_or_default();
@@ -184,6 +231,11 @@ impl Daemon {
     pub fn stop_all(&mut self) {
         // Reverse order: project processes, web, PHP, then services.
         for p in self.procs.iter_mut().rev() { stop(p); }
+        // Stops already running in the background: wait for them too, so nothing is left behind.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline && self.procs.iter().any(|p| p.stopping.as_ref().is_some_and(|f| f.load(Ordering::SeqCst))) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn find(&mut self, name: &str) -> Option<&mut Proc> { self.procs.iter_mut().find(|p| p.spec.name == name) }
@@ -204,15 +256,15 @@ impl Daemon {
         for &i in &matched {
             let p = &mut self.procs[i];
             p.wanted = wanted;
-            if wanted { if p.child.is_none() { p.restarts = 0; p.next_start = Some(Instant::now()); } } else { stop(p); }
+            if wanted { if p.child.is_none() { p.restarts = 0; p.next_start = Some(Instant::now()); } } else { stop_async(p); }
         }
         !matched.is_empty()
     }
 
     pub fn restart(&mut self, name: &str) -> bool {
         let mut any = false;
-        for p in self.procs.iter_mut().filter(|p| Self::matches(p, name)) {
-            stop(p);
+        for p in self.procs.iter_mut().filter(|p| Self::matches(p, name) && !p.retired) {
+            stop_async(p);
             p.wanted = true;
             p.restarts = 0;
             p.next_start = Some(Instant::now());
@@ -335,4 +387,51 @@ pub fn spawn_background() -> R<u32> {
     // tez running. macOS/Linux: a new session, so the terminal's Ctrl+C and hangup never reach it.
     let child: Child = sys::spawn_detached(&mut cmd)?;
     Ok(child.id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A command that runs for about `secs` seconds and then exits by itself.
+    fn waiter(secs: u32) -> (PathBuf, Vec<String>) {
+        if cfg!(windows) { ("ping".into(), vec!["-n".into(), (secs + 1).to_string(), "127.0.0.1".into()]) } else { ("sleep".into(), vec![secs.to_string()]) }
+    }
+
+    fn running(spec: Spec, secs: u32) -> Proc {
+        let (exe, args) = waiter(secs);
+        let mut cmd = Command::new(exe);
+        cmd.args(args).hidden().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut p = Proc::new(spec);
+        p.child = Some(cmd.spawn().unwrap());
+        p.state = State::Running;
+        p
+    }
+
+    #[test]
+    fn a_slow_stop_does_not_hold_the_daemon() {
+        let (exe, args) = waiter(2);
+        let spec = Spec::new("slow", "service", PathBuf::from("unused")).stop_with(exe, args);
+        let mut d = Daemon { procs: vec![running(spec.clone(), 3)], started: SystemTime::now(), notes: Vec::new() };
+        let t = Instant::now();
+        d.reconcile(Vec::new());
+        assert!(t.elapsed() < Duration::from_millis(500), "reconcile waited {:?} for the stop", t.elapsed());
+        assert_eq!(d.procs[0].state, State::Stopping);
+        // Turned back on while it is still stopping: kept, and started again once stopped.
+        d.reconcile(vec![spec]);
+        assert_eq!(d.procs.len(), 1);
+        assert!(d.procs[0].wanted && !d.procs[0].retired);
+        assert_eq!(d.procs[0].state, State::Stopping);
+    }
+
+    #[test]
+    fn a_stopped_process_leaves_the_list() {
+        let spec = Spec::new("quick", "service", PathBuf::from("unused"));
+        let mut d = Daemon { procs: vec![running(spec, 30)], started: SystemTime::now(), notes: Vec::new() };
+        d.reconcile(Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !d.procs.is_empty() && Instant::now() < deadline { d.tick(); std::thread::sleep(Duration::from_millis(50)); }
+        assert!(d.procs.is_empty(), "still listed after stopping");
+    }
 }

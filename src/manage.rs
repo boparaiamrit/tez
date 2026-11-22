@@ -381,11 +381,14 @@ pub fn site_get(name: &str) -> R<Value> {
     let cfg = Config::load();
     let s = site(name)?;
     let detected = project::detect(&s);
+    // What this project would run with no switches set: those stay as cards when turned off.
+    let suggested = { let mut plain = s.clone(); plain.settings.processes.clear(); project::detect(&plain) };
     let procs: Vec<Value> = KNOWN_PROCS.iter().map(|(n, about)| {
         let d = detected.iter().find(|p| p.name == *n);
-        json!({ "name": n, "about": about, "on": d.is_some(), "reason": d.map(|p| p.reason.clone()), "command": d.map(|p| p.command.join(" ").replace("@php", "php")) })
+        let sug = suggested.iter().any(|p| p.name == *n);
+        json!({ "name": n, "about": about, "on": d.is_some(), "suggested": sug, "reason": d.map(|p| p.reason.clone()), "command": d.map(|p| p.command.join(" ").replace("@php", "php")) })
     }).chain(detected.iter().filter(|p| !KNOWN_PROCS.iter().any(|(n, _)| *n == p.name)).map(|p| json!({
-        "name": p.name, "about": "custom process from tez.json", "on": true, "reason": p.reason, "command": p.command.join(" ").replace("@php", "php") })))
+        "name": p.name, "about": "custom process from tez.json", "on": true, "suggested": true, "reason": p.reason, "command": p.command.join(" ").replace("@php", "php") })))
         .collect();
     let files: Vec<String> = std::fs::read_dir(s.path.join("config")).map(|rd| {
         let mut v: Vec<String> = rd.flatten().filter_map(|e| e.file_name().to_str().map(|x| x.to_string())).filter(|n| n.ends_with(".php")).collect();

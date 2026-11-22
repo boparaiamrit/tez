@@ -4,7 +4,9 @@
 
 use crate::pages;
 use crate::ui::*;
-use crate::{api, do_remove, go, go_back, go_forward, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Page, Tez};
+use crate::{api, busy_on, do_remove, flip_proc, flip_service, flip_site, go, go_back, go_forward, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Busy, Page, Tez};
+use std::collections::BTreeMap;
+use std::time::Duration;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -49,16 +51,17 @@ fn ctx_items(kind: &str, cx: &App) -> Vec<MenuItem> {
                 mi("Open terminal here", move |_, _| api::open_terminal(&p2)),
                 mi("Open in editor", move |_, _| api::open_editor(&p3)),
                 mi("Copy address", move |_, cx| { cx.write_to_clipboard(ClipboardItem::new_string(u2.clone())); notify(cx, "Address copied".to_string()); }),
-                MenuItem { sep_before: true, ..mi(if up { "Stop its processes" } else { "Start its processes" }, move |_, cx| send(cx, format!("/api/site/{n1}/{}", if up { "down" } else { "up" }), json!({}), if up { "Stopping processes" } else { "Starting processes" })) },
+                MenuItem { sep_before: true, ..mi(if up { "Stop its processes" } else { "Start its processes" }, move |_, cx| flip_site(cx, &n1, !up)) },
                 MenuItem { sep_before: true, ..mi("Remove site…", move |_, cx| open_remove(cx, n2.clone())) },
             ]
         }
         "svc" => {
-            let on = arr(&t.status["procs"]).iter().any(|x| txt(&x["name"]) == name && x["state"] == "running");
+            let on = arr(&t.status["procs"]).iter().any(|x| txt(&x["name"]) == name && x["wanted"] != false);
+            let title = arr(&t.services["services"]).iter().find(|s| txt(&s["name"]) == name).map(|s| txt(&s["title"])).filter(|x| !x.is_empty()).unwrap_or_else(|| name.clone());
             let (n1, n2, n3, n4) = (name.clone(), name.clone(), name.clone(), name.clone());
             vec![
                 mi("Details", move |_, cx| { cx.global_mut::<Tez>().svc_sel = n1.clone(); go(cx, Page::Services); }),
-                mi(if on { "Stop" } else { "Start" }, move |_, cx| send(cx, format!("/api/service/{n2}"), json!({ "enabled": !on }), if on { "Stopped; data kept" } else { "Starting" })),
+                mi(if on { "Stop" } else { "Start" }, move |_, cx| flip_service(cx, &n2, &title, !on)),
                 mi("Restart", move |_, cx| send(cx, format!("/api/proc/{n3}/restart"), json!({}), "Restarting")),
                 MenuItem { sep_before: true, ..mi("Show its log", move |_, cx| { cx.global_mut::<Tez>().log_sel = n4.clone(); go(cx, Page::Logs); }) },
             ]
@@ -202,7 +205,7 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
     let close_hint = t.close_hint;
     let removing = t.del_site.is_some();
     let ctx = t.ctx.clone();
-    let message = t.message.as_ref().map(|(m, _)| m.clone());
+    let toast_el = toasts(&p, cx);
     let title = titlebar(&p, cx);
     let rail_el = rail(&p, cx);
     let side = if side_hidden { None } else { Some(side_list(&p, cx)) };
@@ -220,9 +223,42 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
         .when_some(close_note_el, |d, c| d.child(c))
         .when_some(remove_el, |d, c| d.child(c))
         .when_some(ctx_el, |d, c| d.child(c))
-        .when_some(message, |d, m| d.child(div().absolute().bottom(px(22.)).right(px(22.)).max_w(px(460.)).px(px(16.)).py(px(11.))
-            .rounded(px(12.)).bg(p.surface3).border_1().border_color(p.line2).shadow_lg().text_size(px(14.)).child(m)))
+        .when_some(toast_el, |d, t| d.child(t))
         .into_any_element()
+}
+
+/// Bottom right: a line with a spinner for each change still going, then what just finished.
+/// Quick changes skip the progress line. Clicking the result dismisses it.
+fn toasts(p: &Pal, cx: &App) -> Option<Div> {
+    let t = tez(cx);
+    let mut items: Vec<AnyElement> = Vec::new();
+    let mut going: Vec<(&String, &Busy)> = t.busy.iter().filter(|(_, b)| b.since.elapsed() > Duration::from_millis(300)).collect();
+    going.sort_by_key(|(_, b)| b.since);
+    for (k, b) in going {
+        items.push(toast_box(p, format!("tb-{k}"), spinner(SharedString::from(format!("ts-{k}")), 16., p.accent_text).into_any_element(), format!("{}…", b.doing)).into_any_element());
+    }
+    if let Some(m) = &t.message {
+        let (fg, _) = p.tone(m.tone);
+        let lead = match m.tone {
+            Tone::Ok => icon("circle-check", 16., fg),
+            Tone::Err => icon("circle-alert", 16., fg),
+            Tone::Warn => icon("triangle-alert", 16., fg),
+            _ => icon("info", 16., p.text3),
+        };
+        items.push(toast_box(p, format!("tm-{}", m.id), lead.into_any_element(), m.text.clone())
+            .cursor_pointer().on_click(|_, _, cx| { cx.global_mut::<Tez>().message = None; cx.refresh_windows(); }).into_any_element());
+    }
+    if items.is_empty() { return None; }
+    Some(div().absolute().bottom(px(20.)).right(px(20.)).flex().flex_col().items_end().gap(px(8.)).children(items))
+}
+
+fn toast_box(p: &Pal, id: String, lead: AnyElement, text: String) -> Stateful<Div> {
+    let body = div().flex().flex_row().items_center().gap(px(10.)).min_w(px(260.)).max_w(px(420.)).pl(px(12.)).pr(px(16.)).py(px(10.))
+        .rounded(px(10.)).bg(p.surface).border_1().border_color(p.line2).shadow_lg().text_size(px(13.5)).text_color(p.text)
+        .child(lead).child(div().flex_1().min_w(px(0.)).child(text));
+    // Rise and fade in once, when it first appears.
+    div().id(sid(id.clone())).child(body.with_animation(SharedString::from(format!("{id}-in")), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+        |d, t| d.opacity(t).mt(px(8. * (1. - t)))))
 }
 
 fn icon_btn(id: impl Into<ElementId>, p: &Pal, name: &str, dim: bool, round: bool) -> Stateful<Div> {
@@ -358,19 +394,21 @@ fn rail(p: &Pal, cx: &App) -> Div {
     let pp = *p;
     let item = move |id: &str, ic: &str, on: bool, badge: bool, target: Page| {
         div().id(sid(format!("rail-{id}"))).size(px(42.)).rounded(px(12.)).flex().items_center().justify_center().relative()
-            .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
+            .when(on, |d| d.bg(pp.rail_on).shadow_sm()).when(!on, |d| d.hover(move |s| s.bg(pp.rail_hover)))
             .child(icon(ic, 21., if on { pp.text } else { pp.text3 }))
             .when(badge, |d| d.child(div().absolute().top(px(8.)).right(px(8.)).size(px(8.)).rounded_full().bg(pp.text)))
             .on_click(move |_, _, cx| go(cx, target.clone()))
     };
     let mut status = div().flex().flex_col()
         .child(div().id("rail-status").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center()
-            .hover(move |s| s.bg(pp.surface2))
+            .hover(move |s| s.bg(pp.rail_hover))
             .child(div().size(px(20.)).rounded_full().border_2().border_color(if online { pp.green } else { pp.text3 }).flex().items_center().justify_center()
                 .child(div().size(px(8.)).rounded_full().bg(if online { pp.green } else { pp.text3 })))
             .on_click(|_, _, cx| { let t = cx.global_mut::<Tez>(); t.menu_open = if t.menu_open.as_deref() == Some("status") { None } else { Some("status".into()) }; cx.refresh_windows(); }));
     if status_open { status = status.child(deferred(anchored().snap_to_window().child(menu_popover(p, "status", cx))).with_priority(2)); }
-    div().w(px(60.)).flex_none().flex().flex_col().items_center().gap(px(6.)).pt(px(4.)).pb(px(12.))
+    // One step deeper than the sidebar, with a hairline, so the two columns read apart.
+    div().w(px(60.)).flex_none().flex().flex_col().items_center().gap(px(6.)).pt(px(8.)).pb(px(12.))
+        .bg(p.rail).border_r_1().border_color(p.rail_line)
         .child(item("home", "house", home, false, Page::Overview))
         .child(item("sites", "globe", !home && sec == Section::Sites, false, Page::Sites))
         .child(item("services", "database", sec == Section::Services, false, Page::Services))
@@ -378,7 +416,7 @@ fn rail(p: &Pal, cx: &App) -> Div {
         .child(item("debug", "bug", sec == Section::Debug, new_dumps, Page::Dumps))
         .child(div().flex_1())
         .child(div().id("rail-settings").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center()
-            .hover(move |s| s.bg(pp.surface2)).child(icon("settings", 21., p.text3))
+            .hover(move |s| s.bg(pp.rail_hover)).child(icon("settings", 21., p.text3))
             .on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = true; cx.refresh_windows(); }))
         .child(status)
 }
@@ -447,13 +485,14 @@ fn side_list(p: &Pal, cx: &App) -> Div {
             let row = |s: &Value, installed: bool| {
                 let name = txt(&s["name"]);
                 let st = procs.iter().find(|x| txt(&x["name"]) == name).map(|x| txt(&x["state"])).unwrap_or_default();
+                let changing = t.busy.contains_key(&format!("svc:{name}")) || st == "stopping";
                 let end = if installed { s["port"].as_u64().map(|x| format!(":{x}")) } else { Some("add".into()) };
                 let n2 = name.clone();
                 let ctx_kind = format!("svc:{name}");
                 div().id(sid(format!("sv-{name}"))).flex().flex_row().items_center().gap(px(10.)).h(px(32.)).px(px(10.)).rounded(px(6.))
                     .when(installed, |d| d.on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }))
                     .when(name == sel, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
-                    .child(if installed { dot(if st == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 15., pp.text3).into_any_element() })
+                    .child(if changing { spinner(sid(format!("svsp-{name}")), 12., pp.amber).into_any_element() } else if installed { dot(if st == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 15., pp.text3).into_any_element() })
                     .child(div().flex_1().truncate().text_color(if installed { pp.text } else { pp.text2 }).child(txt(&s["title"])))
                     .when_some(end, |d, e| d.child(div().text_size(px(13.)).text_color(pp.text3).child(e)))
                     .on_click(move |_, _, cx| { cx.global_mut::<Tez>().svc_sel = n2.clone(); go(cx, Page::Services); })
@@ -545,7 +584,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
         .child(div().h(px(48.)).flex_none().relative().flex().items_center().justify_center()
             .when_some(seg_el, |d, s| d.child(s))
             .child(div().absolute().right(px(12.)).top(px(8.)).flex().flex_row().gap(px(6.)).children(right)))
-        .child(div().id(sid(format!("panel-scroll-{:?}-{}", tez(cx).page, tez(cx).side_hidden))).flex_1().min_h(px(0.)).overflow_y_scroll()
+        .child(div().id(sid(format!("panel-scroll-{:?}-{}", tez(cx).page, tez(cx).side_hidden))).flex_1().min_h(px(0.)).overflow_y_scroll().track_scroll(&tez(cx).panel_scroll)
             .child(div().w_full().px(px(32.)).pt(px(8.)).pb(px(40.)).flex().flex_col().items_start()
                 .child(div().w_full().max_w(px(1120.)).flex().flex_col().gap(px(22.)).child(body))))
         .into_any_element()
@@ -815,16 +854,23 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
 
     out = out.child(site_cards(p, cx, true));
     // Services as cards.
+    // Every installed service gets a card, running or not, so turning one off never moves the
+    // cards around; a stopped one shows Stopped and its switch.
     let svc_meta = arr(&t.services["services"]);
     let smx = t.svc_metrics.clone();
+    let busy = t.busy.clone();
+    let mut names: Vec<String> = svc_meta.iter().filter(|s| s["installed"] == true).map(|s| txt(&s["name"])).collect();
+    for x in procs.iter().filter(|x| x["group"] == "service") { let n = txt(&x["name"]); if !names.contains(&n) { names.push(n); } }
     let mut sgrid: Vec<AnyElement> = Vec::new();
-    for x in procs.iter().filter(|x| x["group"] == "service") {
-        let name = txt(&x["name"]);
+    for name in names {
+        let x = procs.iter().find(|x| txt(&x["name"]) == name).cloned().unwrap_or(Value::Null);
         let meta = svc_meta.iter().find(|m| txt(&m["name"]) == name).cloned().unwrap_or(Value::Null);
         let title = { let t = txt(&meta["title"]); if t.is_empty() { pool_name(&name) } else { t } };
         let kind = { let k = txt(&meta["kind"]); if k.is_empty() { name.split('@').next().unwrap_or_default().to_string() } else { k } };
-        let st = txt(&x["state"]);
-        let on = x["wanted"].as_bool().unwrap_or(true);
+        let st = if x.is_null() { "stopped".to_string() } else { txt(&x["state"]) };
+        let change = busy.get(&format!("svc:{name}"));
+        let on = change.map(|b| b.on).unwrap_or_else(|| !x.is_null() && x["wanted"].as_bool().unwrap_or(true));
+        let live = st == "running";
         let stat = smx[&name].clone();
         let key_stat: (String, &'static str) = match kind.as_str() {
             "postgres" => (arr(&stat["databases"]).len().to_string(), "databases"),
@@ -833,12 +879,20 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
             "meilisearch" => (stat["indexes"].as_u64().unwrap_or(0).to_string(), "indexes"),
             _ => (x["restarts"].as_u64().unwrap_or(0).to_string(), "restarts"),
         };
-        let status = format!("{}{}", state_label(&st), x["port"].as_u64().map(|p| format!(" · :{p}")).unwrap_or_default());
-        let (n2, sel) = (name.clone(), name.clone());
+        let port = x["port"].as_u64().or(meta["port"].as_u64()).filter(|p| *p > 0).map(|p| format!(" · :{p}")).unwrap_or_default();
+        let (status, tone) = match change {
+            Some(b) => (if b.on { "Starting…".to_string() } else { "Stopping…".to_string() }, Tone::Warn),
+            None => (format!("{}{port}", state_label(&st)), state_tone(&st)),
+        };
+        let (n2, sel, t2) = (name.clone(), name.clone(), title.clone());
+        let dash = || "—".to_string();
         sgrid.push(cardbox(p)
-            .child(card_header(p, sid(format!("svh-{name}")), pages::service_icon(&kind), &title, &status, state_tone(&st),
-                Some(switch(sid(format!("svs-{name}")), p, on).on_click(move |_, _, cx| send(cx, format!("/api/service/{n2}"), json!({ "enabled": !on }), if on { "Stopped; data kept" } else { "Starting" })).into_any_element()), None))
-            .child(stat_strip(p, vec![(mb(x["memory"].as_u64().unwrap_or(0)), "memory", None), (format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)), "CPU", None), (key_stat.0, key_stat.1, None)]))
+            .child(card_header(p, sid(format!("svh-{name}")), pages::service_icon(&kind), &title, &status, tone,
+                Some(switch_busy(sid(format!("svs-{name}")), p, on, change.is_some()).on_click(move |_, _, cx| flip_service(cx, &n2, &t2, !on)).into_any_element()), None))
+            .child(stat_strip(p, vec![
+                (if live { mb(x["memory"].as_u64().unwrap_or(0)) } else { dash() }, "memory", None),
+                (if live { format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)) } else { dash() }, "CPU", None),
+                (if live { key_stat.0 } else { dash() }, key_stat.1, None)]))
             .child(div().mt_auto().flex().flex_row().px(px(8.)).py(px(6.)).child(text_btn(sid(format!("svd-{name}")), p, "Details").on_click(move |_, _, cx| { cx.global_mut::<Tez>().svc_sel = sel.clone(); go(cx, Page::Services); }))).into_any_element());
     }
     out = out.child(div().flex().flex_col().gap(px(14.)).child(h2(p, "Services")).child(grid_of(sgrid, 3)));
@@ -982,7 +1036,8 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
     }
 
     // Processes and site details (shared with the old page).
-    out = out.child(process_rows(p, name, d, live));
+    let busy = tez(cx).busy.clone();
+    out = out.child(process_rows(p, name, d, live, &busy));
     let installed: Vec<String> = arr(&tez(cx).status["php"]).iter().map(|v| txt(&v["minor"])).collect();
     let isolated = s["isolated"].as_bool().unwrap_or(false);
     let php_now = txt(&s["php"]);
@@ -1182,46 +1237,58 @@ fn card_header(p: &Pal, id: ElementId, ic: &str, title: &str, status: &str, tone
         .when_some(control, |d, c| d.child(c))
 }
 
-/// Running processes as cards; the rest in one "Can also run" list, each with its switch.
-fn process_rows(p: &Pal, name: &str, d: &Value, live: &[Value]) -> AnyElement {
+/// The processes this project uses as cards (running or not, so a card never moves when it is
+/// switched off); the rest in one "Can also run" list, each with its switch.
+fn process_rows(p: &Pal, name: &str, d: &Value, live: &[Value], busy: &BTreeMap<String, Busy>) -> AnyElement {
     let pp = *p;
     let mut cards: Vec<AnyElement> = Vec::new();
     let mut idle: Vec<AnyElement> = Vec::new();
     let mut running = 0;
+    let site_up = d["up"].as_bool().unwrap_or(false);
     for pr in arr(&d["processes"]) {
         let pn = txt(&pr["name"]);
-        let on = pr["on"].as_bool().unwrap_or(false);
+        let on_cfg = pr["on"].as_bool().unwrap_or(false);
+        let change = busy.get(&format!("proc:{name}/{pn}"));
+        let on = change.map(|b| b.on).unwrap_or(on_cfg);
         let lv = live.iter().find(|x| txt(&x["name"]) == format!("{name}/{pn}")).cloned();
         let about = { let a = txt(&pr["about"]); if a.is_empty() { txt(&pr["command"]) } else { a } };
         let (site, p2) = (name.to_string(), pn.clone());
-        let sw = switch(sid(format!("pon-{pn}")), p, on).on_click(move |_, _, cx| send(cx, format!("/api/site/{site}"), json!({ "processes": { p2.clone(): !on } }), "Saved"));
-        match lv {
-            Some(x) => {
-                running += 1;
-                let st = txt(&x["state"]);
-                let mem = x["memory"].as_u64().unwrap_or(0);
-                let status = format!("{}{}", state_label(&st), x["uptime"].as_u64().filter(|u| *u > 0).map(|u| format!(" · up {}", ago(u))).unwrap_or_default());
-                let dash = Some(txt(&x["url"])).filter(|u| !u.is_empty());
-                let full = format!("{name}/{pn}");
-                let (site2, p3) = (name.to_string(), pn.clone());
-                cards.push(cardbox(p)
-                    .child(card_header(p, sid(format!("ph-{pn}")), pages::proc_icon(&pn), &cap(&pn), &status, state_tone(&st), Some(sw.into_any_element()), None))
-                    .child(div().px(px(16.)).pb(px(12.)).text_size(px(14.)).text_color(pp.text3).truncate().child(about))
-                    .child(stat_strip(p, vec![
-                        (mb(mem), "memory", if mem > 1 << 30 { Some(pp.amber) } else { None }),
-                        (format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)), "CPU", None),
-                        (x["restarts"].as_u64().unwrap_or(0).to_string(), "restarts", if x["restarts"].as_u64().unwrap_or(0) > 0 { Some(pp.amber) } else { None }),
-                    ]))
-                    .child(div().mt_auto().flex().flex_row().gap(px(2.)).px(px(8.)).py(px(6.))
-                        .when_some(dash, |d, u| d.child(text_btn(sid(format!("pd-{pn}")), &pp, "Dashboard").on_click(move |_, _, _| api::open_url(&u))))
-                        .child(text_btn(sid(format!("pr-{pn}")), p, "Restart").on_click(move |_, _, cx| send(cx, format!("/api/proc/{full}/restart"), json!({}), "Restarting")))
-                        .child(text_btn(sid(format!("pl-{pn}")), p, "Log").on_click(move |_, _, cx| { set_local(cx, &format!("log:{site2}"), p3.clone()); cx.global_mut::<Tez>().site_tab = "logs".into(); refresh_now(cx, false); }))).into_any_element());
-            }
-            None => {
+        let sw = switch_busy(sid(format!("pon-{pn}")), p, on, change.is_some()).on_click(move |_, _, cx| flip_proc(cx, &site, &p2, !on, site_up));
+        let as_card = lv.is_some() || on_cfg || pr["suggested"].as_bool().unwrap_or(false) || change.is_some();
+        if as_card {
+            let x = lv.clone().unwrap_or(Value::Null);
+            let st = if x.is_null() { "stopped".to_string() } else { txt(&x["state"]) };
+            if st == "running" { running += 1; }
+            let up = st == "running";
+            let mem = x["memory"].as_u64().unwrap_or(0);
+            let (status, tone) = match change {
+                Some(b) if site_up => (if b.on { "Starting…".to_string() } else { "Stopping…".to_string() }, Tone::Warn),
+                Some(b) => (if b.on { "Turning on…".to_string() } else { "Turning off…".to_string() }, Tone::Warn),
+                None if !x.is_null() => (format!("{}{}", state_label(&st), x["uptime"].as_u64().filter(|u| *u > 0).map(|u| format!(" · up {}", ago(u))).unwrap_or_default()), state_tone(&st)),
+                None if on_cfg => ("On · starts with the site".to_string(), Tone::Neutral),
+                None => ("Off".to_string(), Tone::Neutral),
+            };
+            let dash = Some(txt(&x["url"])).filter(|u| !u.is_empty() && up);
+            let full = format!("{name}/{pn}");
+            let (site2, p3) = (name.to_string(), pn.clone());
+            let none = || "—".to_string();
+            cards.push(cardbox(p)
+                .child(card_header(p, sid(format!("ph-{pn}")), pages::proc_icon(&pn), &cap(&pn), &status, tone, Some(sw.into_any_element()), None))
+                .child(div().px(px(16.)).pb(px(12.)).text_size(px(14.)).text_color(pp.text3).truncate().child(about))
+                .child(stat_strip(p, vec![
+                    (if up { mb(mem) } else { none() }, "memory", if up && mem > 1 << 30 { Some(pp.amber) } else { None }),
+                    (if up { format!("{:.1}%", x["cpu"].as_f64().unwrap_or(0.)) } else { none() }, "CPU", None),
+                    (if x.is_null() { none() } else { x["restarts"].as_u64().unwrap_or(0).to_string() }, "restarts", if x["restarts"].as_u64().unwrap_or(0) > 0 { Some(pp.amber) } else { None }),
+                ]))
+                .child(div().mt_auto().flex().flex_row().gap(px(2.)).px(px(8.)).py(px(6.))
+                    .when_some(dash, |d, u| d.child(text_btn(sid(format!("pd-{pn}")), &pp, "Dashboard").on_click(move |_, _, _| api::open_url(&u))))
+                    .when(!x.is_null(), |d| d.child(text_btn(sid(format!("pr-{pn}")), p, "Restart").on_click(move |_, _, cx| send(cx, format!("/api/proc/{full}/restart"), json!({}), "Restarting"))))
+                    .child(text_btn(sid(format!("pl-{pn}")), p, "Log").on_click(move |_, _, cx| { set_local(cx, &format!("log:{site2}"), p3.clone()); cx.global_mut::<Tez>().site_tab = "logs".into(); refresh_now(cx, false); }))).into_any_element());
+        } else {
+            {
                 idle.push(div().flex().flex_row().items_center().gap(px(14.)).px(px(16.)).py(px(11.)).border_t_1().border_color(pp.cardline)
                     .child(div().size(px(30.)).flex_none().rounded(px(9.)).bg(pp.surface3).flex().items_center().justify_center().child(icon(pages::proc_icon(&pn), 15., pp.text3)))
                     .child(div().flex_1().min_w(px(0.)).flex().flex_row().items_baseline().gap(px(8.)).child(div().font_weight(FontWeight::SEMIBOLD).child(cap(&pn))).child(div().text_size(px(14.)).text_color(pp.text3).truncate().child(about)))
-                    .when(on, |d| d.child(div().text_size(px(13.5)).text_color(pp.text3).child("starts with the site")))
                     .child(sw)
                     .into_any_element());
             }
@@ -1229,9 +1296,10 @@ fn process_rows(p: &Pal, name: &str, d: &Value, live: &[Value]) -> AnyElement {
     }
     let mut g = div().flex().flex_col().gap(px(14.))
         .child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Processes")).child(muted(p, format!("{running} running"))));
-    if running > 0 { g = g.child(grid_of(cards, 3)); }
+    let has_cards = !cards.is_empty();
+    if has_cards { g = g.child(grid_of(cards, 3)); }
     if !idle.is_empty() {
-        g = g.child(cardbox(p).child(div().px(px(16.)).pt(px(14.)).pb(px(8.)).text_size(px(14.)).text_color(pp.text3).child(if running > 0 { "Can also run with this site" } else { "Runs with this site when turned on" })).children(idle));
+        g = g.child(cardbox(p).child(div().px(px(16.)).pt(px(14.)).pb(px(8.)).text_size(px(14.)).text_color(pp.text3).child(if has_cards { "Can also run with this site" } else { "Runs with this site when turned on" })).children(idle));
     }
     g.into_any_element()
 }
@@ -1266,9 +1334,12 @@ fn site_cards(p: &Pal, cx: &App, titled: bool) -> AnyElement {
         let (url, path) = (txt(&s["url"]), txt(&s["path"]));
         let horizon = live.iter().find(|x| txt(&x["name"]).ends_with("/horizon")).map(|x| txt(&x["url"])).filter(|u| !u.is_empty());
         let n2 = name.clone();
-        let ctl = if declared { Some(switch(sid(format!("hcs-{name}")), p, up_cfg).on_click(move |_, _, cx| send(cx, format!("/api/site/{n2}/{}", if up_cfg { "down" } else { "up" }), json!({}), if up_cfg { "Stopping processes" } else { "Starting processes" })).into_any_element()) } else { None };
+        let change = busy_on(cx, &format!("site:{name}"));
+        let up_now = change.unwrap_or(up_cfg);
+        let status = match change { Some(true) => "Starting processes…".to_string(), Some(false) => "Stopping processes…".to_string(), None => status };
+        let ctl = if declared { Some(switch_busy(sid(format!("hcs-{name}")), p, up_now, change.is_some()).on_click(move |_, _, cx| flip_site(cx, &n2, !up_now)).into_any_element()) } else { None };
         grid.push(cardbox(p)
-            .child(card_header(p, sid(format!("hc-{name}")), "folder", &name, &status, if running { Tone::Ok } else { Tone::Neutral }, ctl, Some(Page::Site(name.clone()))))
+            .child(card_header(p, sid(format!("hc-{name}")), "folder", &name, &status, if change.is_some() { Tone::Warn } else if running { Tone::Ok } else { Tone::Neutral }, ctl, Some(Page::Site(name.clone()))))
             .child(stat_strip(p, vec![
                 (if has_req { format!("{rpm:.0} / min") } else { "—".into() }, "requests", None),
                 (if has_req { mm["p95_ms"].as_f64().filter(|v| *v > 0.).map(ms).unwrap_or("—".into()) } else { "—".into() }, "p95 response", None),

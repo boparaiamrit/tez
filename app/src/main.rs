@@ -40,6 +40,39 @@ pub enum Page {
     Settings,
 }
 
+/// What a change in flight waits for in /api/status before it counts as done.
+#[derive(Clone, Debug)]
+pub enum Check {
+    /// Done when the request returns.
+    None,
+    /// One process (a service, or "site/process"): running when turned on, gone or stopped when off.
+    Proc(String),
+    /// A site's processes: one running when turned on, all stopped when off.
+    Site(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct Busy {
+    /// The side the switch is moving to.
+    pub on: bool,
+    /// "Stopping PostgreSQL", shown with a spinner.
+    pub doing: String,
+    /// "PostgreSQL stopped. Its data is kept.", shown when it is done.
+    pub done: String,
+    pub since: Instant,
+    /// The request has returned; now it waits for the status to show the change.
+    pub sent: bool,
+    pub check: Check,
+}
+
+#[derive(Clone, Debug)]
+pub struct Toast {
+    pub id: u64,
+    pub text: String,
+    pub tone: ui::Tone,
+    pub at: Instant,
+}
+
 #[derive(Default)]
 pub struct Tez {
     pub online: bool,
@@ -62,7 +95,15 @@ pub struct Tez {
     pub drafts: BTreeMap<String, String>,
     /// Saves waiting for typing to pause: key -> (API path, body, when queued).
     pub pending: BTreeMap<String, (String, Value, Instant)>,
-    pub message: Option<(String, Instant)>,
+    /// The toast in the corner: what just finished or went wrong.
+    pub message: Option<Toast>,
+    pub toast_seq: u64,
+    /// Changes on their way: key ("svc:postgres", "site:hello", "proc:hello/vite", "req:7") ->
+    /// what it is doing. A switch shows its new side with a spinner, and a toast says what is
+    /// happening, until tez reports it done.
+    pub busy: BTreeMap<String, Busy>,
+    /// The main panel's scroll position (so `go scroll:bottom` can show the end of a page).
+    pub panel_scroll: ScrollHandle,
     /// Small bits of view state: filters, the chosen log, the repo picked, folder names.
     pub local: BTreeMap<String, String>,
     pub page: Page,
@@ -220,6 +261,23 @@ fn navigate(cx: &mut App, target: &str) {
         "mail" => go(cx, Page::Mail),
         "logs" => go(cx, Page::Logs),
         "settings" => { let t = cx.global_mut::<Tez>(); t.settings_open = true; t.settings_sec = b.to_string(); }
+        // `go flip:svc:redis` or `go flip:site:hello`: flip that switch the way a click does.
+        "flip" => {
+            let t = tez(cx);
+            match b {
+                "svc" => {
+                    let on = t.status["procs"].as_array().map(|a| a.iter().any(|x| txt(&x["name"]) == c && x["wanted"] != false)).unwrap_or(false);
+                    let title = t.services["services"].as_array().and_then(|a| a.iter().find(|s| txt(&s["name"]) == c)).map(|s| txt(&s["title"])).unwrap_or_else(|| c.to_string());
+                    flip_service(cx, c, &title, !on);
+                }
+                "site" => {
+                    let up = t.status["sites"].as_array().and_then(|a| a.iter().find(|s| txt(&s["name"]) == c)).map(|s| s["up"] == true).unwrap_or(false);
+                    flip_site(cx, c, !up);
+                }
+                _ => {}
+            }
+        }
+        "scroll" => { if b == "bottom" { tez(cx).panel_scroll.scroll_to_bottom(); } else { tez(cx).panel_scroll.set_offset(point(px(0.), px(0.))); } cx.refresh_windows(); }
         "close-note" => cx.global_mut::<Tez>().close_hint = true,
         "offline" => cx.global_mut::<Tez>().preview_offline = true,
         "menu" => cx.global_mut::<Tez>().menu_open = Some(b.to_string()),
@@ -239,9 +297,93 @@ pub fn txt(v: &Value) -> String {
     match v { Value::String(s) => s.clone(), Value::Null => String::new(), other => other.to_string() }
 }
 
-pub fn notify(cx: &mut App, msg: impl Into<String>) {
-    cx.global_mut::<Tez>().message = Some((msg.into(), Instant::now()));
+pub fn notify(cx: &mut App, msg: impl Into<String>) { toast(cx, ui::Tone::Neutral, msg); }
+
+/// Show a toast: Ok for done, Err for a failure (it stays longer), Warn, or Neutral.
+pub fn toast(cx: &mut App, tone: ui::Tone, msg: impl Into<String>) {
+    let t = cx.global_mut::<Tez>();
+    t.toast_seq += 1;
+    t.message = Some(Toast { id: t.toast_seq, text: msg.into(), tone, at: Instant::now() });
     cx.refresh_windows();
+}
+
+/// The progress line for a change that is still going, from the message it will end with.
+fn doing_label(ok: &str) -> String {
+    let first = ok.split([';', '.']).next().unwrap_or(ok).trim();
+    if first.ends_with("ing") { first.to_string() } else if first.starts_with("Saved") { "Saving".into() } else { "Working on it".into() }
+}
+
+/// Turn something on or off. The switch moves at once and spins, a toast says what is happening,
+/// and the request runs in the background; when tez reports the change done the toast says so.
+/// A failure puts the switch back and says why. A second click while it runs is ignored.
+#[allow(clippy::too_many_arguments)]
+pub fn flip(cx: &mut App, key: String, on: bool, doing: String, done: String, check: Check, path: String, body: Value) {
+    if tez(cx).busy.contains_key(&key) { return; }
+    cx.global_mut::<Tez>().busy.insert(key.clone(), Busy { on, doing, done, since: Instant::now(), sent: false, check });
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        let r = cx.background_executor().spawn(async move { api::post(&path, &body) }).await;
+        let _ = cx.update(|cx| {
+            match r {
+                Ok(_) => { if let Some(b) = cx.global_mut::<Tez>().busy.get_mut(&key) { b.sent = true; } }
+                Err(e) => { cx.global_mut::<Tez>().busy.remove(&key); toast(cx, ui::Tone::Err, e); }
+            }
+            refresh_now(cx, true);
+        });
+    })
+    .detach();
+}
+
+/// Whether a switch is mid-change, and to which side.
+pub fn busy_on(cx: &App, key: &str) -> Option<bool> { tez(cx).busy.get(key).map(|b| b.on) }
+
+pub fn flip_service(cx: &mut App, name: &str, title: &str, on: bool) {
+    let (doing, done) = if on { (format!("Starting {title}"), format!("{title} is running")) } else { (format!("Stopping {title}"), format!("{title} stopped. Its data is kept.")) };
+    flip(cx, format!("svc:{name}"), on, doing, done, Check::Proc(name.to_string()), format!("/api/service/{name}"), json!({ "enabled": on }));
+}
+
+pub fn flip_site(cx: &mut App, site: &str, on: bool) {
+    let (doing, done) = if on { (format!("Starting {site}'s processes"), format!("{site}'s processes are running")) } else { (format!("Stopping {site}'s processes"), format!("{site}'s processes stopped")) };
+    flip(cx, format!("site:{site}"), on, doing, done, Check::Site(site.to_string()), format!("/api/site/{site}/{}", if on { "up" } else { "down" }), json!({}));
+}
+
+/// One of a site's processes. With the site's processes running it starts or stops now;
+/// otherwise the choice is saved for the next start.
+pub fn flip_proc(cx: &mut App, site: &str, process: &str, on: bool, site_up: bool) {
+    let label = { let mut c = process.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() };
+    let (doing, done, check) = if site_up {
+        if on { (format!("Starting {label}"), format!("{label} is running"), Check::Proc(format!("{site}/{process}"))) }
+        else { (format!("Stopping {label}"), format!("{label} stopped"), Check::Proc(format!("{site}/{process}"))) }
+    } else if on { (format!("Turning {label} on"), format!("{label} starts with {site}'s processes"), Check::None) }
+    else { (format!("Turning {label} off"), format!("{label} is off"), Check::None) };
+    let mut procs = serde_json::Map::new();
+    procs.insert(process.to_string(), Value::Bool(on));
+    flip(cx, format!("proc:{site}/{process}"), on, doing, done, check, format!("/api/site/{site}"), json!({ "processes": procs }));
+}
+
+/// Has the status caught up with a change? None while it is still going, Err when it failed.
+fn settled(status: &Value, b: &Busy) -> Option<Result<(), String>> {
+    let procs = status["procs"].as_array().cloned().unwrap_or_default();
+    let state = |x: &Value| txt(&x["state"]);
+    match &b.check {
+        Check::None => Some(Ok(())),
+        Check::Proc(n) => {
+            let p = procs.iter().find(|x| txt(&x["name"]) == *n);
+            match (b.on, p.map(state).as_deref()) {
+                (true, Some("running")) => Some(Ok(())),
+                (true, Some("failed")) => Some(Err(p.map(|x| txt(&x["last_exit"])).filter(|e| !e.is_empty()).unwrap_or_else(|| "it stopped straight away; its log has the details".into()))),
+                (false, None | Some("stopped") | Some("failed")) => Some(Ok(())),
+                _ => None,
+            }
+        }
+        Check::Site(n) => {
+            let group = format!("site:{n}");
+            let live: Vec<String> = procs.iter().filter(|x| txt(&x["group"]) == group).map(state).collect();
+            if b.on {
+                if live.iter().any(|s| s == "running") { Some(Ok(())) } else if !live.is_empty() && live.iter().all(|s| s == "failed") { Some(Err("its processes stopped straight away; their logs have the details".into())) } else { None }
+            } else if live.iter().all(|s| s == "stopped" || s == "failed") { Some(Ok(())) } else { None }
+        }
+    }
 }
 
 /// Change one setting: the switch or choice shows the new value at once, and tez saves it in the
@@ -259,19 +401,23 @@ pub fn send(cx: &mut App, path: String, body: Value, ok: &'static str) {
     // A settings change only needs the settings and status back, which is quick; the rest of the
     // app catches up on the next regular refresh.
     let settings_only = path == "/api/settings";
+    // A request that takes a moment shows a progress toast until it returns.
+    let key = { let t = cx.global_mut::<Tez>(); t.toast_seq += 1; format!("req:{}", t.toast_seq) };
+    cx.global_mut::<Tez>().busy.insert(key.clone(), Busy { on: true, doing: doing_label(ok), done: String::new(), since: Instant::now(), sent: false, check: Check::None });
     cx.spawn(async move |cx| {
         let r = cx.background_executor().spawn(async move { api::post(&path, &body) }).await;
         let _ = cx.update(|cx| {
-            let msg = match &r {
+            cx.global_mut::<Tez>().busy.remove(&key);
+            let (tone, msg) = match &r {
                 Ok(v) if v["job"].is_number() => {
                     cx.global_mut::<Tez>().job_open = v["job"].as_u64();
-                    format!("{ok}; follow it under Recent activity")
+                    (ui::Tone::Neutral, format!("{ok}; follow it under Recent activity"))
                 }
-                Ok(v) if v["warnings"].as_str().map(|s| !s.is_empty()).unwrap_or(false) => v["warnings"].as_str().unwrap_or_default().to_string(),
-                Ok(_) => ok.to_string(),
-                Err(e) => e.clone(),
+                Ok(v) if v["warnings"].as_str().map(|s| !s.is_empty()).unwrap_or(false) => (ui::Tone::Warn, v["warnings"].as_str().unwrap_or_default().to_string()),
+                Ok(_) => (ui::Tone::Ok, ok.to_string()),
+                Err(e) => (ui::Tone::Err, e.clone()),
             };
-            notify(cx, msg);
+            toast(cx, tone, msg);
             if settings_only { refresh_settings(cx) } else { refresh_now(cx, true) }
         });
     })
@@ -459,6 +605,20 @@ fn apply(cx: &mut App, f: Fetched) {
     if let Some(v) = f.site_metrics { if v.is_object() { t.site_metrics = v; } }
     if let Some(v) = f.svc_metrics { if v.is_object() { t.svc_metrics = v; } }
     if let Some(v) = f.catalog { if v["services"].is_object() { t.catalog = v; } }
+    // Changes in flight that the status now shows done (or failed, or never finished).
+    let status = t.status.clone();
+    let mut finished: Vec<(String, ui::Tone, String)> = Vec::new();
+    for (k, b) in t.busy.iter() {
+        if !b.sent { continue; }
+        match settled(&status, b) {
+            Some(Ok(())) => finished.push((k.clone(), ui::Tone::Ok, b.done.clone())),
+            Some(Err(e)) => finished.push((k.clone(), ui::Tone::Err, format!("{} failed: {e}", b.doing))),
+            None if b.since.elapsed() > Duration::from_secs(45) => finished.push((k.clone(), ui::Tone::Warn, format!("{} is taking longer than usual; its log has the details", b.doing))),
+            None => {}
+        }
+    }
+    for (k, _, _) in &finished { t.busy.remove(k); }
+    if let Some((_, tone, msg)) = finished.into_iter().last() { t.toast_seq += 1; t.message = Some(Toast { id: t.toast_seq, text: msg, tone, at: Instant::now() }); }
     // Drop drafts the server has caught up with (no save pending for them).
     let pending: Vec<String> = t.pending.keys().cloned().collect();
     t.drafts.retain(|k, _| pending.contains(k));
@@ -538,9 +698,16 @@ fn start_loop(cx: &mut App) {
                     cx.global_mut::<Tez>().pending.remove(&k);
                     send(cx, path, body, "Saved");
                 }
-                if let Some((_, at)) = &tez(cx).message { if at.elapsed() > Duration::from_secs(4) { cx.global_mut::<Tez>().message = None; cx.refresh_windows(); } }
+                if let Some(m) = &tez(cx).message {
+                    let keep = if m.tone == ui::Tone::Err { 8 } else { 4 };
+                    if m.at.elapsed() > Duration::from_secs(keep) { cx.global_mut::<Tez>().message = None; cx.refresh_windows(); }
+                }
+                // A progress toast appears once a request has taken a moment.
+                if tez(cx).busy.values().any(|b| b.since.elapsed() > Duration::from_millis(300) && b.since.elapsed() < Duration::from_millis(600)) { cx.refresh_windows(); }
                 if tick % 4 == 0 { apply_theme(cx, false); }
-                if tick % 8 == 0 { refresh_now(cx, tick % 40 == 0); }
+                // Every 2 s, or every 500 ms while a switch is waiting for tez to finish.
+                let changing = tez(cx).busy.values().any(|b| b.sent);
+                if tick % 8 == 0 || (changing && tick % 2 == 0) { refresh_now(cx, tick % 40 == 0); }
             });
             cx.background_executor().timer(Duration::from_millis(250)).await;
             tick += 1;

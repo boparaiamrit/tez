@@ -14,8 +14,14 @@ use std::process::Command;
 
 const SKIP_DIRS: &[&str] = &["vendor", "node_modules", ".playwright", ".turbo", ".next", ".nuxt"];
 const SKIP_SUBDIRS: &[&str] = &["storage/logs", "storage/framework/cache", "storage/framework/sessions", "storage/framework/views", "storage/debugbar"];
-/// Compiled caches hold the old machine's absolute paths; Laravel rebuilds them.
-const SKIP_FILES: &[&str] = &["hot", "config.php", "routes-v7.php", "packages.php", "services.php", "events.php"];
+/// Compiled caches hold the old machine's absolute paths; Laravel rebuilds them. These are paths
+/// from the project root, never bare names: `config/services.php` must still be copied.
+const SKIP_FILES: &[&str] = &[
+    "bootstrap/cache/config.php", "bootstrap/cache/routes-v7.php", "bootstrap/cache/packages.php",
+    "bootstrap/cache/services.php", "bootstrap/cache/events.php", "public/hot",
+];
+/// Kept inside the skipped cache and log folders, so git sees no deleted files.
+const KEEP_IN_SKIPPED: &str = ".gitignore";
 const BIG: u64 = 1 << 30;
 
 fn source_path(src: &str, distro: &str) -> PathBuf {
@@ -62,10 +68,33 @@ pub fn ensure_laravel_dirs(project: &Path) {
     }
 }
 
-/// Copy a tree, leaving out `skip_dirs` (absolute) and files named in `skip_files`. Symlinks are
-/// copied as links, never followed. (macOS and Linux; Windows uses robocopy.)
+/// The skipped files as absolute paths under `src`.
+fn skip_files(src: &Path) -> Vec<PathBuf> {
+    SKIP_FILES.iter().map(|f| paths::join_rel(src, f)).collect()
+}
+
+/// Copy only the `.gitignore` files under `src` into the same places under `dest`. The skipped
+/// cache and log folders hold one each, and Laravel's repo tracks them.
+fn copy_kept(src: &Path, dest: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(src) else { return 0 };
+    let mut copied = 0;
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let p = e.path();
+        if ft.is_dir() {
+            copied += copy_kept(&p, &dest.join(e.file_name()));
+        } else if ft.is_file() && e.file_name() == KEEP_IN_SKIPPED {
+            let _ = std::fs::create_dir_all(dest);
+            copied += std::fs::copy(&p, dest.join(e.file_name())).unwrap_or(0);
+        }
+    }
+    copied
+}
+
+/// Copy a tree, leaving out `skip_dirs` and `skip_files` (both absolute). Symlinks are copied as
+/// links, never followed. (macOS and Linux; Windows uses robocopy.)
 #[cfg(unix)]
-fn copy_filtered(src: &Path, dest: &Path, skip_dirs: &[PathBuf], skip_files: &[&str]) -> R<u64> {
+fn copy_filtered(src: &Path, dest: &Path, skip_dirs: &[PathBuf], skip_files: &[PathBuf]) -> R<u64> {
     std::fs::create_dir_all(dest)?;
     let mut copied = 0;
     for e in std::fs::read_dir(src)?.flatten() {
@@ -80,7 +109,7 @@ fn copy_filtered(src: &Path, dest: &Path, skip_dirs: &[PathBuf], skip_files: &[&
             if skip_dirs.iter().any(|d| d == &p) { continue; }
             copied += copy_filtered(&p, &to, skip_dirs, skip_files)?;
         } else {
-            if skip_files.iter().any(|f| e.file_name() == *f) { continue; }
+            if skip_files.iter().any(|f| f == &p) { continue; }
             copied += std::fs::copy(&p, &to)?;
         }
     }
@@ -144,7 +173,7 @@ pub fn run(args: &[&str]) -> R<()> {
     util::step(&format!("Copying to {}", dest.display()));
     #[cfg(unix)]
     {
-        let bytes = copy_filtered(&src, &dest, &excluded_dirs, SKIP_FILES)?;
+        let bytes = copy_filtered(&src, &dest, &excluded_dirs, &skip_files(&src))?;
         util::ok(&format!("copied {}", util::human_bytes(bytes)));
     }
     #[cfg(windows)]
@@ -153,14 +182,17 @@ pub fn run(args: &[&str]) -> R<()> {
         cmd.arg(&src).arg(&dest).args(["/E", "/XJ", "/MT:32", "/R:1", "/W:1", "/NFL", "/NDL", "/NP", "/NJH"]);
         cmd.arg("/XD");
         for d in &excluded_dirs { cmd.arg(d); }
+        // Full paths: a bare name would also leave out every other file with that name.
         cmd.arg("/XF");
-        for f in SKIP_FILES { cmd.arg(f); }
+        for f in skip_files(&src) { cmd.arg(f); }
         let status = cmd.status()?;
         // robocopy: 0-7 are success codes (files copied, extras, mismatches), 8+ means failures.
         if status.code().unwrap_or(16) >= 8 { bail!("the copy did not finish cleanly (robocopy code {})", status.code().unwrap_or(-1)); }
     }
-    // The skipped cache and log folders must exist (empty), or Laravel refuses to boot.
+    // The skipped cache and log folders must exist, or Laravel refuses to boot; their .gitignore
+    // files come across so git shows nothing deleted.
     ensure_laravel_dirs(&dest);
+    for sub in SKIP_SUBDIRS { copy_kept(&paths::join_rel(&src, sub), &paths::join_rel(&dest, sub)); }
     util::ok(&format!("{folder} is at {} and served at https://{}.{}", dest.display(), util::host_label(&folder), cfg.tld));
     println!("  next, in that folder:");
     println!("    {}   point .env at tez's services and create the database", bold("tez adopt"));
@@ -169,4 +201,35 @@ pub fn run(args: &[&str]) -> R<()> {
     println!("    {}   tables", bold("php artisan migrate"));
     println!("    {}   Horizon, Reverb, Vite", bold("tez up"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_compiled_caches_but_not_config_files() {
+        let src = Path::new("project");
+        let skip = skip_files(src);
+        assert!(skip.contains(&paths::join_rel(src, "bootstrap/cache/services.php")));
+        assert!(skip.contains(&paths::join_rel(src, "public/hot")));
+        assert!(!skip.contains(&paths::join_rel(src, "config/services.php")));
+        assert!(!skip.contains(&paths::join_rel(src, "config/events.php")));
+    }
+
+    #[test]
+    fn keeps_gitignore_files_from_skipped_folders() {
+        let root = std::env::temp_dir().join(format!("tez-import-test-{}", std::process::id()));
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(src.join("storage/framework/cache/data/ab")).unwrap();
+        std::fs::write(src.join("storage/framework/cache/.gitignore"), "*\n").unwrap();
+        std::fs::write(src.join("storage/framework/cache/data/.gitignore"), "*\n").unwrap();
+        std::fs::write(src.join("storage/framework/cache/data/ab/blob"), "cached").unwrap();
+        copy_kept(&src.join("storage/framework/cache"), &dest.join("storage/framework/cache"));
+        assert!(dest.join("storage/framework/cache/.gitignore").is_file());
+        assert!(dest.join("storage/framework/cache/data/.gitignore").is_file());
+        assert!(!dest.join("storage/framework/cache/data/ab/blob").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

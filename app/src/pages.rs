@@ -1,7 +1,7 @@
 //! Every screen, built from the parts in ui.rs, laid out as on the design canvas.
 
 use crate::ui::*;
-use crate::{api, clone_repo, draft, ensure_pecl, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, set_setting, site_log_choice, tez, txt, Page, Tez};
+use crate::{api, busy_on, clone_repo, draft, ensure_pecl, flip_service, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, set_setting, site_log_choice, tez, txt, Page, Tez};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -688,18 +688,20 @@ pub(crate) fn services_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEl
         installed.first().or(list.first()).map(|s| txt(&s["name"])).unwrap_or_default()
     } else { t.svc_sel.clone() };
     let pp = *p;
+    let busy = t.busy.clone();
     let item = |s: &Value, is_installed: bool| {
         let name = txt(&s["name"]);
         let active = name == sel;
         let state = procs.iter().find(|x| txt(&x["name"]) == name).map(|x| txt(&x["state"])).unwrap_or_else(|| "stopped".into());
+        let change = busy.get(&format!("svc:{name}")).map(|b| b.on);
         let port = s["port"].as_u64().map(|x| format!(":{x}")).unwrap_or_default();
         let n2 = name.clone();
         div().id(sid(format!("svc-{name}"))).flex().flex_row().items_center().gap(px(10.)).px(px(10.)).py(px(9.)).rounded(px(8.))
             .when(active, |d| d.bg(pp.surface2)).hover(move |s| s.bg(pp.surface2))
-            .child(if is_installed { dot(if state == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 13., pp.text3).into_any_element() })
+            .child(if change.is_some() || state == "stopping" { spinner(SharedString::from(format!("svl-{name}")), 12., pp.amber).into_any_element() } else if is_installed { dot(if state == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 13., pp.text3).into_any_element() })
             .child(div().flex_1().min_w(px(0.)).flex().flex_col()
                 .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(if active { pp.text } else { pp.text2 }).child(txt(&s["title"])))
-                .when(is_installed, |d| d.child(div().font_family(MONO).text_size(px(11.5)).text_color(pp.text3).child(format!("{port}{}", if state == "running" { String::new() } else { " · stopped".into() })))))
+                .when(is_installed, |d| d.child(div().font_family(MONO).text_size(px(11.5)).text_color(pp.text3).child(format!("{port}{}", match change { Some(true) => " · starting…".to_string(), Some(false) => " · stopping…".to_string(), None if state == "running" => String::new(), None => " · stopped".into() })))))
             .on_click(move |_, _, cx| { cx.global_mut::<Tez>().svc_sel = n2.clone(); cx.refresh_windows(); })
     };
     let mut nav = card(p).flex_none().w(px(250.)).p(px(6.)).gap(px(2.));
@@ -742,7 +744,8 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
     }
     let live = procs.iter().find(|x| txt(&x["name"]) == name).cloned().unwrap_or(Value::Null);
     let state = { let s = txt(&live["state"]); if s.is_empty() { "stopped".to_string() } else { s } };
-    let enabled = s["enabled"].as_bool().unwrap_or(false);
+    let change = busy_on(cx, &format!("svc:{name}"));
+    let enabled = change.unwrap_or_else(|| s["enabled"].as_bool().unwrap_or(false));
     let full = txt(&s["full_version"]);
     let mut stats = Vec::new();
     if let Some(m) = live["memory"].as_u64() { if m > 0 { stats.push(mb(m)); } }
@@ -755,7 +758,10 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
             .child(div().flex_1().min_w(px(240.)).flex().flex_col().gap(px(2.))
                 .child(div().flex().flex_row().items_center().gap(px(10.))
                     .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(format!("{title} {full}")))
-                    .child(pill(p, state_tone(&state), state_label(&state), true)))
+                    .child(match change {
+                        Some(on) => pill(p, Tone::Warn, if on { "Starting…" } else { "Stopping…" }, true),
+                        None => pill(p, state_tone(&state), state_label(&state), true),
+                    }))
                 .child(muted(p, if stats.is_empty() { about.clone() } else { format!("{} · {about}", stats.join(" · ")) })))
             .when(!url.is_empty(), |d| { let u = url.clone(); d.child(button("svc-open", p, Kind::Secondary, false, Some("external-link"), Some("Open")).on_click(move |_, _, _| api::open_url(&u))) })
             .child(button("svc-restart", p, Kind::Secondary, false, None, Some("Restart")).on_click(move |_, _, cx| send(cx, format!("/api/proc/{n1}/restart"), json!({}), "Restarting"))));
@@ -775,7 +781,7 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
     }).collect();
     let mut ess: Vec<AnyElement> = vec![
         field(p, "Running", Some("Off stops it for every site and keeps its data".into()), false,
-            switch("svc-run", p, enabled).on_click(move |_, _, cx| send(cx, format!("/api/service/{n3}"), json!({ "enabled": !enabled }), if enabled { "Stopped; data kept" } else { "Starting" }))).into_any_element(),
+            { let t3 = title.clone(); switch_busy("svc-run", p, enabled, change.is_some()).on_click(move |_, _, cx| flip_service(cx, &n3, &t3, !enabled)) }).into_any_element(),
         field(p, "Port", Some("Listens on 127.0.0.1 only. Sites need their .env changed too.".into()), false, div().w(px(120.)).child(input_el(&port_in, true))).into_any_element(),
     ];
     let cat = service_versions(cx, &kind);

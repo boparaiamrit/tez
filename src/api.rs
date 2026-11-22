@@ -342,5 +342,5 @@ pub fn wait_running(secs: u64) -> bool {
 
 #[allow(dead_code)]
 pub fn state_label(s: State) -> &'static str {
-    match s { State::Starting => "starting", State::Running => "running", State::Backoff => "restarting", State::Stopped => "stopped", State::Failed => "failed" }
+    match s { State::Starting => "starting", State::Running => "running", State::Backoff => "restarting", State::Stopping => "stopping", State::Stopped => "stopped", State::Failed => "failed" }
 }

@@ -5,6 +5,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub const SANS: &str = if cfg!(windows) { "Segoe UI" } else if cfg!(target_os = "macos") { ".SystemUIFont" } else { "Inter" };
 /// The UI font: Windows 11's Segoe UI Variable when it is installed (Segoe UI before that), the
@@ -89,6 +90,12 @@ pub struct Pal {
     pub toggle: Hsla,
     /// The window around the panel when the system material shows through it.
     pub glass: Hsla,
+    /// The icon rail: a tint one step deeper than the sidebar beside it, a hairline on its edge,
+    /// the chip under the chosen section, and the hover.
+    pub rail: Hsla,
+    pub rail_line: Hsla,
+    pub rail_on: Hsla,
+    pub rail_hover: Hsla,
 }
 
 fn c(x: u32) -> Hsla { rgb(x).into() }
@@ -113,6 +120,7 @@ impl Pal {
             shadow1: ca(0x00000080), shadow2: ca(0x00000047), highlight: ca(0xffffff0d),
             toggle: c(0x2f74e0),
             glass: ca(0x141414b8),
+            rail: ca(0x000000a6), rail_line: ca(0xffffff0f), rail_on: c(0x2c2c2c), rail_hover: ca(0xffffff12),
         }
     }
     pub fn light() -> Pal {
@@ -133,6 +141,7 @@ impl Pal {
             shadow1: ca(0x1018280f), shadow2: ca(0x1018281c), highlight: ca(0x00000000),
             toggle: c(0x2563eb),
             glass: ca(0xf1f1f3c4),
+            rail: ca(0x0000000c), rail_line: ca(0x00000012), rail_on: c(0xffffff), rail_hover: ca(0xffffff99),
         }
     }
     pub fn tone(&self, t: Tone) -> (Hsla, Hsla) {
@@ -152,14 +161,14 @@ impl Global for PalHolder {}
 
 pub fn pal(cx: &App) -> Pal { cx.try_global::<PalHolder>().map(|p| p.0).unwrap_or_else(Pal::dark) }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tone { Ok, Warn, Err, Info, Accent, Neutral }
 
 /// The tone for a process state from the daemon.
 pub fn state_tone(state: &str) -> Tone {
     match state {
         "running" => Tone::Ok,
-        "starting" | "backoff" => Tone::Warn,
+        "starting" | "backoff" | "stopping" => Tone::Warn,
         "failed" => Tone::Err,
         _ => Tone::Neutral,
     }
@@ -169,6 +178,7 @@ pub fn state_label(state: &str) -> &'static str {
     match state {
         "running" => "Running",
         "starting" => "Starting",
+        "stopping" => "Stopping",
         "backoff" => "Restarting",
         "failed" => "Failed",
         "stopped" => "Stopped",
@@ -293,11 +303,29 @@ pub fn field(p: &Pal, label: &str, help: Option<String>, mono_label: bool, contr
         .child(div().w(px(300.)).flex_none().flex().flex_row().justify_end().child(control))
 }
 
-pub fn switch(id: impl Into<ElementId>, p: &Pal, on: bool) -> Stateful<Div> {
-    div().id(id).w(px(40.)).h(px(22.)).flex_none().rounded_full().p(px(3.)).flex().flex_row().items_center()
-        .bg(if on { p.toggle } else { p.line2 })
-        .when(on, |d| d.justify_end())
-        .child(div().size(px(16.)).rounded_full().bg(white()).shadow_sm())
+pub fn switch(id: impl Into<ElementId>, p: &Pal, on: bool) -> Stateful<Div> { switch_busy(id, p, on, false) }
+
+/// A switch. While its change is on the way (`busy`) the knob slides to the new side and a
+/// spinner turns inside it, until tez says the change is done.
+pub fn switch_busy(id: impl Into<ElementId>, p: &Pal, on: bool, busy: bool) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let knob = div().size(px(16.)).flex_none().rounded_full().bg(white()).shadow_sm().flex().items_center().justify_center()
+        .when(busy, |d| d.child(spinner(SharedString::from(format!("{id}-spin")), 12., if on { p.toggle } else { p.text3 })));
+    let track = div().id(id.clone()).w(px(40.)).h(px(22.)).flex_none().rounded_full().p(px(3.)).flex().flex_row().items_center()
+        .bg(if on { p.toggle } else { p.line2 });
+    if busy {
+        // Slide in from the side it was on (18 px of travel), once, as the change starts.
+        track.child(knob.with_animation(SharedString::from(format!("{id}-slide-{on}")), Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+            move |k, t| k.ml(px(if on { 18. * t } else { 18. * (1. - t) }))))
+    } else {
+        track.when(on, |d| d.justify_end()).child(knob)
+    }
+}
+
+/// A turning progress ring.
+pub fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
+    icon("loader-circle", size, color)
+        .with_animation(id, Animation::new(Duration::from_millis(800)).repeat(), |s, t| s.with_transformation(Transformation::rotate(percentage(t))))
 }
 
 pub fn banner(p: &Pal, tone: Tone, icon_name: &str, title: &str, body: &str) -> Div {
