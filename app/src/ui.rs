@@ -7,6 +7,44 @@ use gpui_kit::*;
 use std::rc::Rc;
 
 pub const SANS: &str = if cfg!(windows) { "Segoe UI" } else if cfg!(target_os = "macos") { ".SystemUIFont" } else { "Inter" };
+/// The UI font: Windows 11's Segoe UI Variable when it is installed (Segoe UI before that), the
+/// system font on macOS, Inter on Linux.
+pub fn sans() -> &'static str {
+    static F: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        if !cfg!(windows) { return SANS; }
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        if std::path::Path::new(&windir).join("Fonts").join("SegUIVar.ttf").exists() { "Segoe UI Variable Text" } else { "Segoe UI" }
+    })
+}
+
+/// Whether the window gets the system material behind its sidebar: Mica on Windows 11 (build
+/// 22621 and later) and vibrancy on macOS. Elsewhere the window stays opaque.
+pub fn window_material() -> bool {
+    static M: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *M.get_or_init(|| {
+        if cfg!(target_os = "macos") { return true; }
+        if !cfg!(windows) { return false; }
+        windows_build() >= 22621
+    })
+}
+
+#[cfg(windows)]
+fn windows_build() -> u32 {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("reg")
+        .args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "CurrentBuildNumber"])
+        .creation_flags(0x0800_0000).output();
+    out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().last().and_then(|v| v.parse().ok())).unwrap_or(0)
+}
+#[cfg(not(windows))]
+fn windows_build() -> u32 { 0 }
+
+/// A shortcut as this platform writes it: "Mod+N" is Ctrl+N on Windows and Linux, ⌘N on macOS.
+pub fn keys(s: &str) -> String {
+    if cfg!(target_os = "macos") { s.replace("Mod+", "⌘").replace("Alt+", "⌥").replace("Shift+", "⇧") } else { s.replace("Mod+", "Ctrl+") }
+}
+
 /// Body text: 14 px is Windows' size, 13 px macOS's. Everything else is sized from the same scale.
 pub const BODY: f32 = if cfg!(target_os = "macos") { 13. } else { 14. };
 pub const MONO: &str = "JetBrains Mono";
@@ -49,6 +87,8 @@ pub struct Pal {
     pub highlight: Hsla,
     /// A switch's track when on.
     pub toggle: Hsla,
+    /// The window around the panel when the system material shows through it.
+    pub glass: Hsla,
 }
 
 fn c(x: u32) -> Hsla { rgb(x).into() }
@@ -72,6 +112,7 @@ impl Pal {
             card: c(0x262626), cardline: c(0x323232),
             shadow1: ca(0x00000080), shadow2: ca(0x00000047), highlight: ca(0xffffff0d),
             toggle: c(0x2f74e0),
+            glass: ca(0x141414b8),
         }
     }
     pub fn light() -> Pal {
@@ -91,6 +132,7 @@ impl Pal {
             card: c(0xffffff), cardline: ca(0x00000014),
             shadow1: ca(0x1018280f), shadow2: ca(0x1018281c), highlight: ca(0x00000000),
             toggle: c(0x2563eb),
+            glass: ca(0xf1f1f3c4),
         }
     }
     pub fn tone(&self, t: Tone) -> (Hsla, Hsla) {

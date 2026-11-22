@@ -12,6 +12,9 @@ mod pages;
 mod tray;
 mod ui;
 
+// GPUI's macros name `gpui::`; gpui-kit asks apps to alias it so they resolve through the Kit.
+extern crate gpui_kit as gpui;
+
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -76,6 +79,10 @@ pub struct Tez {
     /// What has been typed into the open long menu to filter it, and the focus that receives it.
     pub combo_q: String,
     pub combo_focus: Option<FocusHandle>,
+    /// The open right-click menu: where, and what it is for ("site:hello", "svc:postgres", "php:8.4").
+    pub ctx: Option<(Point<Pixels>, String)>,
+    /// Show the offline screen while tez is running (`go offline`), to check it.
+    pub preview_offline: bool,
     pub select_closed: Option<(String, Instant)>,
     /// Groups the user opened or closed, against their default.
     pub toggled: BTreeSet<String>,
@@ -121,6 +128,68 @@ struct MainWindow(Option<AnyWindowHandle>);
 impl Global for MainWindow {}
 
 static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+gpui_kit::actions!(tez, [GoHome, GoSites, GoServices, GoPhp, GoDebug, OpenSettings, Jump, NewSite, Refresh, Dismiss, GoBack, GoForward, ToggleSidebar, QuitApp]);
+
+pub fn go_back(cx: &mut App) {
+    let t = cx.global_mut::<Tez>();
+    if let Some(prev) = t.back.pop() { let cur = t.page.clone(); t.fwd.push(cur); t.page = prev; t.menu_open = None; refresh_now(cx, false); cx.refresh_windows(); }
+}
+
+pub fn go_forward(cx: &mut App) {
+    let t = cx.global_mut::<Tez>();
+    if let Some(next) = t.fwd.pop() { let cur = t.page.clone(); t.back.push(cur); t.page = next; t.menu_open = None; refresh_now(cx, false); cx.refresh_windows(); }
+}
+
+/// Close whatever floats over the page: menus, the jump box, Settings, dialogs.
+pub fn dismiss(cx: &mut App) {
+    let t = cx.global_mut::<Tez>();
+    t.open_select = None;
+    t.menu_open = None;
+    t.ctx = None;
+    t.jump = false;
+    t.settings_open = false;
+    t.del_site = None;
+    t.close_hint = false;
+    cx.refresh_windows();
+}
+
+/// The keyboard: Ctrl (⌘ on macOS) + 1-5 for the sections, K to jump, comma for Settings, N for a
+/// new site, R or F5 to refresh, B for the sidebar, Alt+arrows for back and forward, Esc to close.
+fn bind_shortcuts(cx: &mut App) {
+    // ⌘ on macOS, Ctrl elsewhere (this GPUI does not parse "secondary-").
+    cx.bind_keys([
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-1" } else { "ctrl-1" }, GoHome, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-2" } else { "ctrl-2" }, GoSites, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-3" } else { "ctrl-3" }, GoServices, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-4" } else { "ctrl-4" }, GoPhp, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-5" } else { "ctrl-5" }, GoDebug, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-," } else { "ctrl-," }, OpenSettings, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-k" } else { "ctrl-k" }, Jump, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-n" } else { "ctrl-n" }, NewSite, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-r" } else { "ctrl-r" }, Refresh, None),
+        KeyBinding::new("f5", Refresh, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-b" } else { "ctrl-b" }, ToggleSidebar, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("alt-right", GoForward, None),
+        KeyBinding::new("escape", Dismiss, None),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-q" } else { "ctrl-q" }, QuitApp, None),
+    ]);
+    cx.on_action(|_: &GoHome, cx| go(cx, Page::Overview));
+    cx.on_action(|_: &GoSites, cx| go(cx, Page::Sites));
+    cx.on_action(|_: &GoServices, cx| go(cx, Page::Services));
+    cx.on_action(|_: &GoPhp, cx| go(cx, Page::Php));
+    cx.on_action(|_: &GoDebug, cx| go(cx, Page::Dumps));
+    cx.on_action(|_: &OpenSettings, cx| { cx.global_mut::<Tez>().settings_open = true; cx.refresh_windows(); });
+    cx.on_action(|_: &Jump, cx| { cx.global_mut::<Tez>().jump = true; cx.refresh_windows(); });
+    cx.on_action(|_: &NewSite, cx| go(cx, Page::NewSite));
+    cx.on_action(|_: &Refresh, cx| { refresh_now(cx, true); notify(cx, "Refreshed".to_string()); });
+    cx.on_action(|_: &ToggleSidebar, cx| { let t = cx.global_mut::<Tez>(); t.side_hidden = !t.side_hidden; cx.refresh_windows(); });
+    cx.on_action(|_: &GoBack, cx| go_back(cx));
+    cx.on_action(|_: &GoForward, cx| go_forward(cx));
+    cx.on_action(|_: &Dismiss, cx| dismiss(cx));
+    cx.on_action(|_: &QuitApp, cx| cx.quit());
+}
 /// A page asked for over the instance port (`go sites`, `go site:hello:logs`, `go settings:ports`),
 /// without bringing the window forward: used to check every page.
 static NAV_REQUEST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -136,6 +205,9 @@ fn navigate(cx: &mut App, target: &str) {
         t.close_hint = false;
         t.del_site = None;
         t.open_select = None;
+        t.ctx = None;
+        t.preview_offline = false;
+        t.menu_open = None;
     }
     match a {
         "home" => go(cx, Page::Overview),
@@ -149,6 +221,9 @@ fn navigate(cx: &mut App, target: &str) {
         "logs" => go(cx, Page::Logs),
         "settings" => { let t = cx.global_mut::<Tez>(); t.settings_open = true; t.settings_sec = b.to_string(); }
         "close-note" => cx.global_mut::<Tez>().close_hint = true,
+        "offline" => cx.global_mut::<Tez>().preview_offline = true,
+        "menu" => cx.global_mut::<Tez>().menu_open = Some(b.to_string()),
+        "ctx" => { cx.global_mut::<Tez>().ctx = Some((point(px(420.), px(220.)), format!("{b}:{c}"))); }
         "remove" => { open_remove(cx, b.to_string()); if c == "files" { cx.global_mut::<Tez>().del_files = true; } }
         "theme" => set_theme(cx, b.to_string()),
         "open" => { let t = cx.global_mut::<Tez>(); t.open_select = Some(b.to_string()); t.combo_q = c.to_string(); }
@@ -509,7 +584,7 @@ pub fn apply_theme(cx: &mut App, force: bool) {
     cx.set_global(ui::PalHolder(p));
     Theme::change(if dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
     let th = cx.global_mut::<Theme>();
-    th.font_family = ui::SANS.into();
+    th.font_family = ui::sans().into();
     th.mono_font_family = ui::MONO.into();
     th.font_size = px(14.);
     th.radius = px(8.);
@@ -561,6 +636,8 @@ fn show_window(cx: &mut App) {
             traffic_light_position: if mac { Some(point(px(16.), px(15.))) } else { None },
         }),
         app_id: Some("dev.tez.app".into()),
+        // Mica on Windows 11, vibrancy on macOS: the desktop colour shows faintly through the sidebar.
+        window_background: if ui::window_material() { if cfg!(windows) { WindowBackgroundAppearance::MicaBackdrop } else { WindowBackgroundAppearance::Blurred } } else { WindowBackgroundAppearance::Opaque },
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
@@ -697,6 +774,7 @@ fn main() {
         let theme = api::app_prefs()["theme"].as_str().unwrap_or("system").to_string();
         cx.set_global(Tez { theme, site_tab: "overview".into(), new_source: "github".into(), range: "1h".into(), settings_sec: "general".into(), combo_focus: Some(cx.focus_handle()), ..Default::default() });
         cx.set_global(MainWindow(None));
+        bind_shortcuts(cx);
         cx.set_global(TrayHolder(tray::Tray::new()));
         apply_theme(cx, true);
         if api::get("/api/ping").is_err() { api::start_daemon(); }

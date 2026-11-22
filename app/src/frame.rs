@@ -4,7 +4,7 @@
 
 use crate::pages;
 use crate::ui::*;
-use crate::{api, do_remove, go, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Page, Tez};
+use crate::{api, do_remove, go, go_back, go_forward, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Page, Tez};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -31,6 +31,69 @@ fn section(page: &Page) -> Section {
 }
 
 // ------------------------------------------------------------------ the frame
+
+/// What a right-click on a sidebar row offers.
+fn ctx_items(kind: &str, cx: &App) -> Vec<MenuItem> {
+    let t = tez(cx);
+    let (what, name) = kind.split_once(':').unwrap_or((kind, ""));
+    let name = name.to_string();
+    match what {
+        "site" => {
+            let s = arr(&t.status["sites"]).into_iter().find(|s| txt(&s["name"]) == name).unwrap_or(Value::Null);
+            let (url, path) = (txt(&s["url"]), txt(&s["path"]));
+            let up = s["up"].as_bool().unwrap_or(false);
+            let (u1, u2, p1, p2, p3, n1, n2) = (url.clone(), url.clone(), path.clone(), path.clone(), path.clone(), name.clone(), name.clone());
+            vec![
+                mi("Open in browser", move |_, _| api::open_url(&u1)),
+                mi("Open folder", move |_, _| api::open_path(&p1)),
+                mi("Open terminal here", move |_, _| api::open_terminal(&p2)),
+                mi("Open in editor", move |_, _| api::open_editor(&p3)),
+                mi("Copy address", move |_, cx| { cx.write_to_clipboard(ClipboardItem::new_string(u2.clone())); notify(cx, "Address copied".to_string()); }),
+                MenuItem { sep_before: true, ..mi(if up { "Stop its processes" } else { "Start its processes" }, move |_, cx| send(cx, format!("/api/site/{n1}/{}", if up { "down" } else { "up" }), json!({}), if up { "Stopping processes" } else { "Starting processes" })) },
+                MenuItem { sep_before: true, ..mi("Remove site…", move |_, cx| open_remove(cx, n2.clone())) },
+            ]
+        }
+        "svc" => {
+            let on = arr(&t.status["procs"]).iter().any(|x| txt(&x["name"]) == name && x["state"] == "running");
+            let (n1, n2, n3, n4) = (name.clone(), name.clone(), name.clone(), name.clone());
+            vec![
+                mi("Details", move |_, cx| { cx.global_mut::<Tez>().svc_sel = n1.clone(); go(cx, Page::Services); }),
+                mi(if on { "Stop" } else { "Start" }, move |_, cx| send(cx, format!("/api/service/{n2}"), json!({ "enabled": !on }), if on { "Stopped; data kept" } else { "Starting" })),
+                mi("Restart", move |_, cx| send(cx, format!("/api/proc/{n3}/restart"), json!({}), "Restarting")),
+                MenuItem { sep_before: true, ..mi("Show its log", move |_, cx| { cx.global_mut::<Tez>().log_sel = n4.clone(); go(cx, Page::Logs); }) },
+            ]
+        }
+        "php" => {
+            let ini = std::path::PathBuf::from(txt(&t.status["home"])).join("php").join(&name).join("php.ini").to_string_lossy().to_string();
+            let (m1, m2, m3) = (name.clone(), name.clone(), name.clone());
+            vec![
+                mi("Details", move |_, cx| { cx.global_mut::<Tez>().php_sel = m1.clone(); go(cx, Page::Php); }),
+                mi("Make default", move |_, cx| set_setting(cx, "default_php", json!(m2.clone()), "Default PHP changed")),
+                mi("Open php.ini", move |_, _| api::open_editor(&ini)),
+                MenuItem { sep_before: true, ..mi("Restart workers", move |_, cx| send(cx, format!("/api/proc/php-{m3}/restart"), json!({}), "Restarting PHP")) },
+            ]
+        }
+        _ => vec![],
+    }
+}
+
+/// The right-click menu, at the pointer.
+fn ctx_menu(p: &Pal, at: Point<Pixels>, kind: &str, cx: &App) -> AnyElement {
+    let items = ctx_items(kind, cx);
+    let pp = *p;
+    let menu = div().occlude().min_w(px(220.)).p(px(4.)).rounded(px(8.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
+        .on_mouse_down_out(|_, _, cx| { cx.global_mut::<Tez>().ctx = None; cx.refresh_windows(); })
+        .children(items.into_iter().enumerate().map(move |(i, it)| {
+            let run = it.run.clone();
+            div().flex().flex_col()
+                .when(it.sep_before && i > 0, |d| d.child(div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(pp.line2)))
+                .child(div().id(sid(format!("cm-{i}"))).flex().flex_row().items_center().h(px(30.)).px(px(10.)).rounded(px(5.)).text_size(px(13.))
+                    .hover(move |s| s.bg(pp.surface3))
+                    .child(div().flex_1().child(it.label.clone()))
+                    .on_click(move |_, window, cx| { cx.global_mut::<Tez>().ctx = None; run(window, cx); cx.refresh_windows(); }))
+        }));
+    deferred(anchored().position(at).snap_to_window().child(menu)).with_priority(3).into_any_element()
+}
 
 /// Remove a site: from tez only, or with its folder to the Recycle Bin, and optionally its database.
 /// Anything that cannot be undone from tez (the folder, the database) needs the name typed back.
@@ -138,6 +201,7 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
     let jump = t.jump;
     let close_hint = t.close_hint;
     let removing = t.del_site.is_some();
+    let ctx = t.ctx.clone();
     let message = t.message.as_ref().map(|(m, _)| m.clone());
     let title = titlebar(&p, cx);
     let rail_el = rail(&p, cx);
@@ -147,13 +211,15 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
     let jump_el = if jump { Some(pages::jump_overlay(&p, window, cx)) } else { None };
     let close_note_el = if close_hint { Some(close_note(&p)) } else { None };
     let remove_el = if removing { Some(remove_dialog(&p, window, cx)) } else { None };
-    div().size_full().relative().flex().flex_col().bg(p.side).text_color(p.text).font_family(SANS).text_size(px(BODY))
+    let ctx_el = ctx.map(|(at, kind)| ctx_menu(&p, at, &kind, cx));
+    div().size_full().relative().flex().flex_col().bg(if window_material() { p.glass } else { p.side }).text_color(p.text).font_family(sans()).text_size(px(BODY))
         .child(title)
         .child(div().flex_1().min_h(px(0.)).flex().flex_row().child(rail_el).when_some(side, |d, s| d.child(s)).child(panel_el))
         .when_some(sheet, |d, s| d.child(s))
         .when_some(jump_el, |d, j| d.child(j))
         .when_some(close_note_el, |d, c| d.child(c))
         .when_some(remove_el, |d, c| d.child(c))
+        .when_some(ctx_el, |d, c| d.child(c))
         .when_some(message, |d, m| d.child(div().absolute().bottom(px(22.)).right(px(22.)).max_w(px(460.)).px(px(16.)).py(px(11.))
             .rounded(px(12.)).bg(p.surface3).border_1().border_color(p.line2).shadow_lg().text_size(px(14.)).child(m)))
         .into_any_element()
@@ -175,14 +241,8 @@ fn titlebar(p: &Pal, cx: &App) -> Div {
     let pp = *p;
     let mut bar = div().h(px(44.)).flex_none().flex().flex_row().items_center().gap(px(4.)).pl(px(if cfg!(target_os = "macos") { 82. } else { 10. }))
         .child(icon_btn("tb-side", p, "panel-left", false, false).on_click(|_, _, cx| { let t = cx.global_mut::<Tez>(); t.side_hidden = !t.side_hidden; cx.refresh_windows(); }))
-        .child(icon_btn("tb-back", p, "chevron-left", !can_back, false).on_click(|_, _, cx| {
-            let t = cx.global_mut::<Tez>();
-            if let Some(prev) = t.back.pop() { let cur = t.page.clone(); t.fwd.push(cur); t.page = prev; t.menu_open = None; refresh_now(cx, false); cx.refresh_windows(); }
-        }))
-        .child(icon_btn("tb-fwd", p, "chevron-right", !can_fwd, false).on_click(|_, _, cx| {
-            let t = cx.global_mut::<Tez>();
-            if let Some(next) = t.fwd.pop() { let cur = t.page.clone(); t.back.push(cur); t.page = next; t.menu_open = None; refresh_now(cx, false); cx.refresh_windows(); }
-        }));
+        .child(icon_btn("tb-back", p, "chevron-left", !can_back, false).on_click(|_, _, cx| go_back(cx)))
+        .child(icon_btn("tb-fwd", p, "chevron-right", !can_fwd, false).on_click(|_, _, cx| go_forward(cx)));
     if !cfg!(target_os = "macos") {
         bar = bar.child(div().w(px(10.)));
         for (key, label) in [("file", "File"), ("edit", "Edit"), ("view", "View"), ("help", "Help")] {
@@ -225,28 +285,28 @@ fn menu_popover(p: &Pal, key: &str, cx: &App) -> Div {
     let parked = arr(&t.settings["parked"]).first().map(txt).unwrap_or_default();
     let mut items: Vec<MenuItem> = match key {
         "file" => vec![
-            mi("New site", |_, cx| go(cx, Page::NewSite)),
+            MenuItem { hint: Some(keys("Mod+N")), ..mi("New site", |_, cx| go(cx, Page::NewSite)) },
             mi("Import a project", |_, cx| { cx.global_mut::<Tez>().new_source = "import".into(); go(cx, Page::NewSite) }),
             mi("Open the Sites folder", move |_, _| api::open_path(&parked)),
             MenuItem { sep_before: true, ..mi(if online { "Restart the web server and PHP" } else { "Start tez" }, move |_, cx| if online { restart_all(cx) } else { api::start_daemon(); notify(cx, "Starting tez") }) },
             mi("Stop tez", |_, cx| send(cx, "/api/shutdown".into(), json!({}), "Stopping tez")),
             MenuItem { sep_before: true, ..mi("Close window", |window, _| window.remove_window()) },
-            mi("Quit tez", |_, cx| cx.quit()),
+            MenuItem { hint: Some(keys("Mod+Q")), ..mi("Quit tez", |_, cx| cx.quit()) },
         ],
         "edit" => vec![
-            mi("Search or jump to", |_, cx| { cx.global_mut::<Tez>().jump = true; cx.refresh_windows(); }),
-            mi("Settings", |_, cx| { cx.global_mut::<Tez>().settings_open = true; cx.refresh_windows(); }),
+            MenuItem { hint: Some(keys("Mod+K")), ..mi("Search or jump to", |_, cx| { cx.global_mut::<Tez>().jump = true; cx.refresh_windows(); }) },
+            MenuItem { hint: Some(keys("Mod+,")), ..mi("Settings", |_, cx| { cx.global_mut::<Tez>().settings_open = true; cx.refresh_windows(); }) },
         ],
         "view" => {
             let mut v = vec![
-                mi("Home", |_, cx| go(cx, Page::Overview)),
-                mi("Sites", |_, cx| go(cx, Page::Sites)),
-                mi("Services", |_, cx| go(cx, Page::Services)),
-                mi("PHP", |_, cx| go(cx, Page::Php)),
-                mi("Dumps", |_, cx| go(cx, Page::Dumps)),
+                MenuItem { hint: Some(keys("Mod+1")), ..mi("Home", |_, cx| go(cx, Page::Overview)) },
+                MenuItem { hint: Some(keys("Mod+2")), ..mi("Sites", |_, cx| go(cx, Page::Sites)) },
+                MenuItem { hint: Some(keys("Mod+3")), ..mi("Services", |_, cx| go(cx, Page::Services)) },
+                MenuItem { hint: Some(keys("Mod+4")), ..mi("PHP", |_, cx| go(cx, Page::Php)) },
+                MenuItem { hint: Some(keys("Mod+5")), ..mi("Dumps", |_, cx| go(cx, Page::Dumps)) },
                 mi("Mail", |_, cx| go(cx, Page::Mail)),
                 mi("Logs", |_, cx| go(cx, Page::Logs)),
-                MenuItem { sep_before: true, ..mi("Show or hide the sidebar", |_, cx| { let t = cx.global_mut::<Tez>(); t.side_hidden = !t.side_hidden; cx.refresh_windows(); }) },
+                MenuItem { sep_before: true, hint: Some(keys("Mod+B")), ..mi("Show or hide the sidebar", |_, cx| { let t = cx.global_mut::<Tez>(); t.side_hidden = !t.side_hidden; cx.refresh_windows(); }) },
             ];
             for (i, (val, label)) in [("system", "Match the system"), ("dark", "Dark"), ("light", "Light")].into_iter().enumerate() {
                 let v2 = val.to_string();
@@ -273,14 +333,14 @@ fn menu_popover(p: &Pal, key: &str, cx: &App) -> Div {
     }
     let pp = *p;
     let k = key.to_string();
-    div().occlude().mt(px(if key == "status" { 4. } else { 40. })).min_w(px(260.)).p(px(6.)).rounded(px(10.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
+    div().occlude().mt(px(if key == "status" { 4. } else { 36. })).min_w(px(240.)).p(px(4.)).rounded(px(8.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
         .on_mouse_down_out(move |_, _, cx| { let t = cx.global_mut::<Tez>(); if t.menu_open.as_deref() == Some(k.as_str()) { t.menu_open = None; cx.refresh_windows(); } })
         .children(items.into_iter().enumerate().map(move |(i, it)| {
             let run = it.run.clone();
             div().flex().flex_col()
-                .when(it.sep_before && i > 0, |d| d.child(div().h(px(1.)).mx(px(8.)).my(px(5.)).bg(pp.line2)))
-                .child(div().id(sid(format!("mi-{i}"))).flex().flex_row().items_center().gap(px(12.)).h(px(36.)).px(px(12.)).rounded(px(9.))
-                    .text_size(px(13.5)).hover(move |s| s.bg(pp.surface3))
+                .when(it.sep_before && i > 0, |d| d.child(div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(pp.line2)))
+                .child(div().id(sid(format!("mi-{i}"))).flex().flex_row().items_center().gap(px(12.)).h(px(30.)).px(px(10.)).rounded(px(5.))
+                    .text_size(px(13.)).hover(move |s| s.bg(pp.surface3))
                     .child(div().flex_1().child(it.label.clone()))
                     .when_some(it.hint.clone(), |d, h| d.child(div().text_size(px(13.)).text_color(pp.text3).child(h)))
                     .when(it.check, |d| d.child(icon("check", 15., pp.text)))
@@ -360,7 +420,9 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 list = list.child(side_sec(p, "Running"));
                 for s in &running {
                     let name = txt(&s["name"]);
-                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone())));
+                    let ctx_kind = format!("site:{name}");
+                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
+                        .on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }));
                     for x in procs.iter().filter(|x| txt(&x["group"]) == format!("site:{name}")) {
                         let short = txt(&x["name"]).rsplit('/').next().unwrap_or_default().to_string();
                         let end = if x["state"] == "running" { x["memory"].as_u64().map(mb) } else { Some(state_label(&txt(&x["state"])).to_lowercase()) };
@@ -372,7 +434,9 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 list = list.child(side_sec(p, if running.is_empty() { "Sites" } else { "Other sites" }));
                 for s in &rest {
                     let name = txt(&s["name"]);
-                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone())));
+                    let ctx_kind = format!("site:{name}");
+                    list = list.child(side_item(format!("si-{name}"), p, Some("folder"), name.clone(), perf(&name).or(Some(format!("PHP {}", txt(&s["php"])))), page == Page::Site(name.clone()), false, Page::Site(name.clone()))
+                        .on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }));
                 }
             }
         }
@@ -385,7 +449,9 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 let st = procs.iter().find(|x| txt(&x["name"]) == name).map(|x| txt(&x["state"])).unwrap_or_default();
                 let end = if installed { s["port"].as_u64().map(|x| format!(":{x}")) } else { Some("add".into()) };
                 let n2 = name.clone();
-                div().id(sid(format!("sv-{name}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.))
+                let ctx_kind = format!("svc:{name}");
+                div().id(sid(format!("sv-{name}"))).flex().flex_row().items_center().gap(px(10.)).h(px(32.)).px(px(10.)).rounded(px(6.))
+                    .when(installed, |d| d.on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); }))
                     .when(name == sel, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
                     .child(if installed { dot(if st == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 15., pp.text3).into_any_element() })
                     .child(div().flex_1().truncate().text_color(if installed { pp.text } else { pp.text2 }).child(txt(&s["title"])))
@@ -407,9 +473,11 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 let users = arr(&v["sites"]).len();
                 let m2 = minor.clone();
                 let on = minor == sel || (sel.is_empty() && v["default"] == true);
-                list = list.child(div().id(sid(format!("pv-{minor}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.))
+                let ctx_kind = format!("php:{minor}");
+                list = list.child(div().id(sid(format!("pv-{minor}"))).flex().flex_row().items_center().gap(px(10.)).h(px(32.)).px(px(10.)).rounded(px(6.))
                     .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
-                    .child(icon("code-xml", 18., pp.text2))
+                    .on_mouse_down(MouseButton::Right, move |ev, _, cx| { cx.global_mut::<Tez>().ctx = Some((ev.position, ctx_kind.clone())); cx.refresh_windows(); })
+                    .child(icon("code-xml", 16., pp.text2))
                     .child(div().flex_1().child(format!("PHP {}", txt(&v["version"]))))
                     .child(div().text_size(px(13.)).text_color(pp.text3).child(if v["default"] == true { "default".to_string() } else if users > 0 { format!("{users} site{}", if users == 1 { "" } else { "s" }) } else { String::new() }))
                     .on_click(move |_, _, cx| { cx.global_mut::<Tez>().php_sel = m2.clone(); go(cx, Page::Php); }));
@@ -433,7 +501,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
 fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     let t = tez(cx);
     let page = t.page.clone();
-    let online = t.online;
+    let online = t.online && !t.preview_offline;
     let pp = *p;
     // The switch at the top of the panel, and the buttons on its right.
     let (seg_el, right): (Option<Div>, Vec<AnyElement>) = match &page {
@@ -462,7 +530,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     } else {
         match page {
             Page::Overview => home(p, cx),
-            Page::Sites => div().flex().flex_col().gap(px(22.)).child(div().flex().flex_col().gap(px(8.)).child(h1(p, "Sites")).child(sub(p, "Every folder in your Sites folders, at name.test and name.localhost."))).child(site_cards(p, cx)).into_any_element(),
+            Page::Sites => { let n = arr(&tez(cx).status["sites"]).len(); div().flex().flex_col().gap(px(22.)).child(div().flex().flex_col().gap(px(8.)).child(h1(p, "Sites")).child(sub(p, format!("{n} site{} from your Sites folders, each at name.test and name.localhost. Right-click one for more.", if n == 1 { "" } else { "s" })))).child(site_cards(p, cx, false)).into_any_element() }
             Page::Site(name) => site_view(p, &name, window, cx),
             Page::NewSite => pages::new_site(p, window, cx),
             Page::Services => pages::services_page(p, window, cx),
@@ -745,7 +813,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
             .child(text_btn("dk-clear", &pp, "Clear").on_click(|_, _, cx| send(cx, "/api/cache/clear".into(), json!({}), "Cleared the download cache")))));
     out = out.child(grid_of(vec![consumers.into_any_element(), disk_card.into_any_element()], 2));
 
-    out = out.child(site_cards(p, cx));
+    out = out.child(site_cards(p, cx, true));
     // Services as cards.
     let svc_meta = arr(&t.services["services"]);
     let smx = t.svc_metrics.clone();
@@ -1174,7 +1242,8 @@ fn grid_of(items: Vec<AnyElement>, cols: usize) -> Div {
     div().grid().grid_cols(cols.max(1) as u16).gap(px(14.)).children(items)
 }
 /// A card per site (Home and the Sites page).
-fn site_cards(p: &Pal, cx: &App) -> AnyElement {
+/// `titled`: Home shows a "Sites" heading above the cards; the Sites page has its own title.
+fn site_cards(p: &Pal, cx: &App, titled: bool) -> AnyElement {
     let t = tez(cx);
     let procs = arr(&t.status["procs"]);
     let pp = *p;
@@ -1213,5 +1282,5 @@ fn site_cards(p: &Pal, cx: &App) -> AnyElement {
                 .child(div().pr(px(10.)).text_size(px(13.5)).text_color(pp.text3).child(if mem > 0 { mb(mem) } else { "PHP pool only".into() }))).into_any_element());
     }
     if sites.is_empty() { grid.push(muted(p, "No sites yet. Add one from the list on the left.").into_any_element()); }
-    div().flex().flex_col().gap(px(14.)).child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Sites")).child(muted(p, format!("{} in your Sites folders", sites.len())))).child(grid_of(grid, 2)).into_any_element()
+    div().flex().flex_col().gap(px(14.)).when(titled, |d| d.child(div().flex().flex_row().items_baseline().gap(px(12.)).child(h2(p, "Sites")).child(muted(p, format!("{} in your Sites folders", sites.len()))))).child(grid_of(grid, 2)).into_any_element()
 }
