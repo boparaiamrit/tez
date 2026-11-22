@@ -72,6 +72,16 @@ Any folder in `%USERPROFILE%\Sites` is a site at `https://<folder>.test`, and al
 `https://<folder>.localhost` too (browsers resolve `.localhost` with no hosts entry).
 `php`, `composer` and `exec` on your PATH pick the PHP version of the site you are in.
 
+### Caddy or Nginx
+
+Caddy serves the sites by default. To use Nginx instead, pick it under Settings, **Web server and
+ports**, or run `tez web use nginx` (`tez web use caddy` to go back). The switch replaces only the
+web server process: the same host names, ports and HTTPS, and the PHP pools keep running. Both
+servers use tez's own certificate authority in `config/ca` (on first use it adopts the one Caddy
+made, so a browser that already trusts it keeps working). For Nginx, tez signs one certificate
+covering every site's names and renews it when the sites change. `tez web` shows which server runs
+and where its config is.
+
 ### Moving a project off WSL
 
 ```powershell
@@ -128,7 +138,7 @@ also has logs, dumps and a config file editor.
 | Part | Source | Notes |
 | --- | --- | --- |
 | PHP 7.4–8.6 | windows.php.net official builds, SHA-256 checked | redis, mongodb and xdebug from PECL; `tez ext install <any>` for the rest |
-| Web server | Caddy 2.11 | local HTTPS CA, HTTP/2, compression, websockets; runs no PHP itself, every site runs on the official PHP builds |
+| Web server | Caddy 2.11 (default) or Nginx 1.30 (nginx.org) | local HTTPS, HTTP/2, compression, websockets; runs no PHP itself, every site runs on the official PHP builds |
 | PHP pools | `php-cgi` per version | 6 workers each, restarted if they exit |
 | PostgreSQL 14–18 | EnterpriseDB builds | TimescaleDB (several versions side by side), PostGIS, pgvector, psql, pg_dump |
 | MySQL 8.0/8.4, MariaDB 10.11–12.3 | official zips | root, no password, 127.0.0.1 |
@@ -152,7 +162,7 @@ differs from Windows:
 | PHP 8.0–8.5 | static-php-cli's prebuilt "bulk" builds (dl.static-php.dev) | One `php` and `php-fpm` per version with ~60 extensions built in (opcache, intl, redis, pcntl, posix, pdo_pgsql, pdo_mysql, pdo_sqlite, gd, imagick, swoole). Extensions cannot be switched or added per version; PECL add-ons, Xdebug and PHP 7.4 are Windows-only for now |
 | PHP 8.6 | not published yet as a static build | Sites that need 8.6 run on Windows for now |
 | PHP pools | `php-fpm`, one master per version | `php_workers` children each |
-| Web server | Caddy 2.11 | The same server on every platform |
+| Web server | Caddy 2.11, or Nginx 1.30 from jirutka/nginx-binaries | Nginx on macOS needs Homebrew's PCRE2 (`brew install pcre2`) |
 | PostgreSQL 14–18 | theseus-rs/postgresql-binaries | TimescaleDB, PostGIS and pgvector are Windows-only for now |
 | Redis | compiled from the source release with `make` | Needs the Xcode Command Line Tools, or `build-essential` on Linux |
 | MariaDB | official bintar | Linux x86_64 only |
@@ -192,8 +202,8 @@ Composer skips the `ext-pcntl`/`ext-posix` platform check through the `composer`
 - Local PostgreSQL trusts connections from 127.0.0.1, so project passwords are not checked
   locally; they are kept in `.env` for parity with production.
 - Every process tez starts runs in a Job Object, so nothing outlives tez.
-- `tez trust` installs tez's own certificate authority into Windows' trusted roots. It never
-  leaves this computer.
+- `tez trust` installs tez's own certificate authority (`config/ca/root.crt`) into the system's
+  trusted roots. Its key never leaves this computer.
 
 ## Layout
 
