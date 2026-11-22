@@ -35,6 +35,8 @@ fn dispatch(args: &[String]) -> R<()> {
         ["install", rest @ ..] => install(rest),
         ["daemon"] => daemon::run(),
         ["start"] => start(),
+        ["start", "--quiet"] => start_opts(true),
+        ["app"] => { if !launch_app(true) { bail!("the desktop app is not installed (tez-app.exe beside tez.exe)"); } Ok(()) }
         ["stop"] => stop(),
         ["restart"] => { stop()?; start() }
         ["restart", name] => proc_action(name, "restart"),
@@ -191,6 +193,15 @@ pub fn install_binaries() -> R<()> {
             if e.file_name().to_string_lossy().contains(".old-") { let _ = std::fs::remove_file(e.path()); }
         }
     }
+    // The desktop app (tray icon and window) ships beside tez.exe.
+    if let Some(dir) = me.parent() {
+        let app = dir.join("tez-app.exe");
+        let dest = bin.join("tez-app.exe");
+        if app.exists() && !same_file(&app, &dest) {
+            let newer = match (app.metadata().and_then(|m| m.modified()), dest.metadata().and_then(|m| m.modified())) { (Ok(a), Ok(b)) => a > b, _ => true };
+            if newer { place_binary(&app, &dest)?; }
+        }
+    }
     let lib = paths::lib_php();
     std::fs::create_dir_all(&lib)?;
     std::fs::write(lib.join("prepend.php"), PREPEND_PHP)?;
@@ -297,8 +308,15 @@ fn install(rest: &[&str]) -> R<()> {
 
 // ---------------------------------------------------------------- daemon control
 
-fn start() -> R<()> {
-    if api::running() { util::ok("tez is already running"); return status(); }
+fn start() -> R<()> { start_opts(false) }
+
+fn start_opts(quiet: bool) -> R<()> {
+    if api::running() {
+        launch_app(false);
+        if quiet { return Ok(()); }
+        util::ok("tez is already running");
+        return status();
+    }
     paths::ensure_dirs()?;
     let me = std::env::current_exe()?;
     if !same_file(&me, &paths::bin().join("tez.exe")) && paths::bin().join("tez.exe").exists() {
@@ -310,6 +328,8 @@ fn start() -> R<()> {
         bail!("tez did not start; see {}", paths::logs_dir().join("daemon.log").display());
     }
     util::ok(&format!("tez is running (pid {pid})"));
+    if launch_app(false) { util::ok("tray icon started (tez open shows the window)"); }
+    if quiet { return Ok(()); }
     std::thread::sleep(Duration::from_millis(1500));
     status()
 }
@@ -366,8 +386,30 @@ fn status() -> R<()> {
     Ok(())
 }
 
+const APP_INSTANCE_PORT: u16 = 7978;
+
+/// Start the desktop app (tray icon). With `show`, bring its window forward.
+fn launch_app(show: bool) -> bool {
+    let app = paths::bin().join("tez-app.exe");
+    if !app.exists() { return false; }
+    let running = !util::port_free(APP_INSTANCE_PORT);
+    if running {
+        // Any connection to the app's instance port asks it to show its window.
+        if show { let _ = std::net::TcpStream::connect(("127.0.0.1", APP_INSTANCE_PORT)); }
+        return true;
+    }
+    use std::os::windows::process::CommandExt;
+    win::stop_std_inheritance();
+    let mut cmd = std::process::Command::new(&app);
+    if !show { cmd.arg("--background"); }
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let flags = win::DETACHED_PROCESS | win::CREATE_NEW_PROCESS_GROUP;
+    cmd.creation_flags(flags | win::CREATE_BREAKAWAY_FROM_JOB).spawn().or_else(|_| cmd.creation_flags(flags).spawn()).is_ok()
+}
+
 fn open_dashboard() -> R<()> {
     if !api::running() { start()?; }
+    if launch_app(true) { return Ok(()); }
     let url = format!("http://127.0.0.1:{}", Config::load().api_port);
     let edge = PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe");
     if edge.exists() {

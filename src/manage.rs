@@ -601,7 +601,9 @@ pub fn ssh_hosts() -> Vec<SshHost> {
 /// mentions the login, as in github.com-<login>), else plain github.com over SSH or gh's HTTPS.
 pub fn route_for(account: &GhAccount, hosts: &[SshHost]) -> String {
     if account.protocol == "ssh" {
-        if let Some(h) = hosts.iter().find(|h| h.hostname == account.host && h.alias != account.host && h.alias.contains(&account.login)) {
+        // Whole parts only: "github.com-acme" names acme, not acmecorp.
+        let names_login = |alias: &str| alias.split(|c: char| c == '-' || c == '_' || c == '.' || c == '+').any(|part| part.eq_ignore_ascii_case(&account.login));
+        if let Some(h) = hosts.iter().find(|h| h.hostname == account.host && h.alias != account.host && names_login(&h.alias)) {
             return format!("ssh:{}", h.alias);
         }
         // The default key belongs to the account no alias claims.

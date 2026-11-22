@@ -6,154 +6,114 @@
 <title>tez</title>
 <style>
 :root {
-  /* spacing scale */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s6: 24px; --s8: 32px; --s12: 48px;
-  /* type scale */
-  --t12: 12px; --t14: 14px; --t16: 16px; --t20: 20px; --t24: 24px;
-  /* cool grays, light theme */
-  --bg: hsl(220 20% 97%);
-  --panel: hsl(0 0% 100%);
-  --panel-2: hsl(220 18% 95%);
-  --line: hsl(220 14% 89%);
-  --text: hsl(222 28% 14%);
-  --text-2: hsl(220 10% 38%);
-  --text-3: hsl(220 9% 52%);
-  --accent: hsl(252 80% 58%);
-  --accent-soft: hsl(252 90% 96%);
-  --accent-text: hsl(252 60% 42%);
-  --ok: hsl(150 62% 38%);
-  --ok-soft: hsl(150 60% 94%);
-  --warn: hsl(36 92% 46%);
-  --warn-soft: hsl(40 95% 93%);
-  --bad: hsl(355 72% 52%);
-  --bad-soft: hsl(355 90% 96%);
+  --t12: 12px; --t14: 14px; --t16: 16px; --t20: 20px;
+  --bg: hsl(220 20% 97%); --panel: hsl(0 0% 100%); --panel-2: hsl(220 18% 95%); --line: hsl(220 14% 89%);
+  --text: hsl(222 28% 14%); --text-2: hsl(220 10% 38%); --text-3: hsl(220 9% 52%);
+  --accent: hsl(252 80% 58%); --accent-soft: hsl(252 90% 96%); --accent-text: hsl(252 60% 42%);
+  --ok: hsl(150 62% 38%); --ok-soft: hsl(150 60% 94%); --warn: hsl(36 92% 46%); --warn-soft: hsl(40 95% 93%);
+  --bad: hsl(355 72% 52%); --bad-soft: hsl(355 90% 96%);
   --shadow-sm: 0 1px 2px hsl(220 30% 20% / .06), 0 1px 3px hsl(220 30% 20% / .08);
-  --shadow-md: 0 4px 8px hsl(220 30% 20% / .06), 0 2px 4px hsl(220 30% 20% / .06);
-  --radius: 10px;
-  color-scheme: light;
+  --shadow-lg: 0 24px 48px hsl(220 30% 10% / .18), 0 4px 12px hsl(220 30% 10% / .08);
+  --radius: 10px; color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: hsl(225 22% 8%);
-    --panel: hsl(224 20% 11%);
-    --panel-2: hsl(224 18% 14%);
-    --line: hsl(224 16% 19%);
-    --text: hsl(220 20% 93%);
-    --text-2: hsl(220 12% 70%);
-    --text-3: hsl(220 10% 56%);
-    --accent: hsl(252 92% 72%);
-    --accent-soft: hsl(252 40% 20%);
-    --accent-text: hsl(252 95% 82%);
-    --ok: hsl(150 60% 52%);
-    --ok-soft: hsl(150 40% 15%);
-    --warn: hsl(40 92% 58%);
-    --warn-soft: hsl(38 50% 16%);
-    --bad: hsl(355 85% 66%);
-    --bad-soft: hsl(355 45% 17%);
-    --shadow-sm: 0 1px 2px hsl(0 0% 0% / .3);
-    --shadow-md: 0 6px 16px hsl(0 0% 0% / .35);
-    color-scheme: dark;
+    --bg: hsl(225 22% 8%); --panel: hsl(224 20% 11%); --panel-2: hsl(224 18% 14%); --line: hsl(224 16% 19%);
+    --text: hsl(220 20% 93%); --text-2: hsl(220 12% 70%); --text-3: hsl(220 10% 56%);
+    --accent: hsl(252 92% 72%); --accent-soft: hsl(252 40% 20%); --accent-text: hsl(252 95% 82%);
+    --ok: hsl(150 60% 52%); --ok-soft: hsl(150 40% 15%); --warn: hsl(40 92% 58%); --warn-soft: hsl(38 50% 16%);
+    --bad: hsl(355 85% 66%); --bad-soft: hsl(355 45% 17%);
+    --shadow-sm: 0 1px 2px hsl(0 0% 0% / .3); --shadow-lg: 0 24px 48px hsl(0 0% 0% / .5); color-scheme: dark;
   }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
-body {
-  background: var(--bg); color: var(--text);
-  font: 400 var(--t14)/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
-a { color: var(--accent-text); text-decoration: none; }
-a:hover { text-decoration: underline; }
-code, .mono { font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size: var(--t12); }
-
-header {
-  position: sticky; top: 0; z-index: 5;
-  display: flex; align-items: center; gap: var(--s6);
-  padding: var(--s3) var(--s6);
-  background: color-mix(in srgb, var(--bg) 86%, transparent);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--line);
-}
-.brand { display: flex; align-items: baseline; gap: var(--s2); }
-.brand b { font-size: var(--t20); font-weight: 700; letter-spacing: -.02em; }
-.brand span { color: var(--text-3); font-size: var(--t12); }
+body { background: var(--bg); color: var(--text); font: 400 var(--t14)/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+a { color: var(--accent-text); text-decoration: none; } a:hover { text-decoration: underline; }
+code, .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: var(--t12); }
+code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: var(--s6); padding: var(--s3) var(--s6); background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: baseline; gap: var(--s2); } .brand b { font-size: var(--t20); font-weight: 700; letter-spacing: -.02em; } .brand span { color: var(--text-3); font-size: var(--t12); }
 nav { display: flex; gap: var(--s1); }
-nav button {
-  border: 0; background: transparent; color: var(--text-2);
-  font: 600 var(--t14)/1 inherit; padding: var(--s2) var(--s3); border-radius: 8px; cursor: pointer;
-  transition: background .15s ease-out, color .15s ease-out;
-}
+nav button { border: 0; background: transparent; color: var(--text-2); font: 600 var(--t14)/1 inherit; padding: var(--s2) var(--s3); border-radius: 8px; cursor: pointer; transition: background .15s ease-out, color .15s ease-out; }
 nav button:hover { background: var(--panel-2); color: var(--text); }
 nav button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .summary { margin-left: auto; display: flex; align-items: center; gap: var(--s3); color: var(--text-2); font-size: var(--t12); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--s2); border-radius: 999px; background: var(--panel-2); font-size: var(--t12); font-weight: 600; color: var(--text-2); white-space: nowrap; }
-.pill.ok { background: var(--ok-soft); color: var(--ok); }
-.pill.warn { background: var(--warn-soft); color: var(--warn); }
-.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.warn { background: var(--warn-soft); color: var(--warn); } .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.accent { background: var(--accent-soft); color: var(--accent-text); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
-.dot.running { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
-.dot.backoff, .dot.starting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
-.dot.failed { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
-
+.dot.running { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); } .dot.backoff, .dot.starting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); } .dot.failed { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
 main { max-width: 1100px; margin: 0 auto; padding: var(--s8) var(--s6) var(--s12); }
 .section-head { display: flex; align-items: baseline; gap: var(--s3); margin: 0 0 var(--s4); }
-.section-head h2 { margin: 0; font-size: var(--t20); font-weight: 650; letter-spacing: -.01em; }
-.section-head p { margin: 0; color: var(--text-3); }
-.notes { margin: 0 0 var(--s6); display: grid; gap: var(--s2); }
-.note { background: var(--warn-soft); color: var(--text); border-radius: var(--radius); padding: var(--s3) var(--s4); font-size: var(--t14); }
-
+.section-head h2 { margin: 0; font-size: var(--t20); font-weight: 650; letter-spacing: -.01em; } .section-head p { margin: 0; color: var(--text-3); }
+.section-head .right { margin-left: auto; display: flex; gap: var(--s2); }
+.notes { margin: 0 0 var(--s6); display: grid; gap: var(--s2); } .note { background: var(--warn-soft); border-radius: var(--radius); padding: var(--s3) var(--s4); }
 .cards { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
 .card { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: var(--s4) var(--s4) var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
-.card-top { display: flex; align-items: flex-start; gap: var(--s3); }
-.card-top .name { font-size: var(--t16); font-weight: 650; }
-.card-top .sub { color: var(--text-3); font-size: var(--t12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.card-top { display: flex; align-items: flex-start; gap: var(--s3); } .card-top .name { font-size: var(--t16); font-weight: 650; }
+.card-top .sub { color: var(--text-3); font-size: var(--t12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 250px; }
 .card-top .right { margin-left: auto; display: flex; gap: var(--s2); align-items: center; }
-.chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
-.chip { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t12); color: var(--text-2); background: var(--panel-2); padding: 3px var(--s2); border-radius: 6px; }
-.actions { display: flex; gap: var(--s2); border-top: 1px solid var(--line); padding-top: var(--s3); }
-.btn {
-  border: 1px solid var(--line); background: var(--panel); color: var(--text);
-  font: 600 var(--t12)/1 inherit; padding: 7px var(--s3); border-radius: 7px; cursor: pointer;
-  transition: background .15s ease-out, border-color .15s ease-out;
-}
-.btn:hover { background: var(--panel-2); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
-.btn.primary:hover { filter: brightness(1.06); }
-.btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
-.btn.ghost:hover { background: var(--panel-2); color: var(--text); }
-.btn:disabled { opacity: .5; cursor: default; }
-
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); } .chip { display: inline-flex; align-items: center; gap: 6px; font-size: var(--t12); color: var(--text-2); background: var(--panel-2); padding: 3px var(--s2); border-radius: 6px; }
+.actions { display: flex; gap: var(--s2); flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: var(--s3); }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 600 var(--t12)/1 inherit; padding: 7px var(--s3); border-radius: 7px; cursor: pointer; transition: background .15s ease-out, border-color .15s ease-out; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.btn:hover { background: var(--panel-2); } .btn.primary { background: var(--accent); border-color: var(--accent); color: white; } .btn.primary:hover { filter: brightness(1.06); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); } .btn.ghost:hover { background: var(--panel-2); color: var(--text); }
+.btn.danger { color: var(--bad); } .btn:disabled { opacity: .5; cursor: default; } .btn.sm { padding: 5px var(--s2); }
 table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
 th, td { text-align: left; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); vertical-align: middle; }
 th { font-size: var(--t12); font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; background: var(--panel-2); }
-tr:last-child td { border-bottom: 0; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
-td .muted, .muted { color: var(--text-3); }
-.row-actions { display: flex; gap: var(--s1); justify-content: flex-end; }
-
+tr:last-child td { border-bottom: 0; } td.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.muted { color: var(--text-3); } .row-actions { display: flex; gap: var(--s1); justify-content: flex-end; flex-wrap: wrap; }
 .log-wrap { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow: hidden; }
 .log-bar { display: flex; gap: var(--s3); align-items: center; padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
-select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 6px var(--s2); }
 pre.log { margin: 0; padding: var(--s4); height: 60vh; overflow: auto; font: 12px/1.55 "Cascadia Code", Consolas, monospace; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
-
 .dump { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); margin-bottom: var(--s3); overflow: hidden; }
-.dump-head { display: flex; gap: var(--s3); padding: var(--s2) var(--s4); font-size: var(--t12); color: var(--text-3); border-bottom: 1px solid var(--line); }
-.dump-head b { color: var(--text-2); font-weight: 600; }
+.dump-head { display: flex; gap: var(--s3); padding: var(--s2) var(--s4); font-size: var(--t12); color: var(--text-3); border-bottom: 1px solid var(--line); } .dump-head b { color: var(--text-2); }
 .dump iframe { width: 100%; border: 0; display: block; min-height: 60px; background: #fff; }
-
-.empty { text-align: center; padding: var(--s12) var(--s6); background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); color: var(--text-2); }
-.empty h3 { margin: 0 0 var(--s2); font-size: var(--t16); color: var(--text); }
-.empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 5px; }
+.empty { text-align: center; padding: var(--s12) var(--s6); background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); color: var(--text-2); } .empty h3 { margin: 0 0 var(--s2); font-size: var(--t16); color: var(--text); }
 .hidden { display: none !important; }
-.toast { position: fixed; bottom: var(--s6); right: var(--s6); background: var(--text); color: var(--bg); padding: var(--s3) var(--s4); border-radius: 8px; box-shadow: var(--shadow-md); font-weight: 600; opacity: 0; transform: translateY(8px); transition: all .2s ease-out; pointer-events: none; }
+input[type=text], input[type=password], input[type=number], select, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 7px var(--s3); width: 100%; transition: border-color .15s, box-shadow .15s; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+textarea { font: 12px/1.5 "Cascadia Code", Consolas, monospace; min-height: 380px; resize: vertical; }
+/* settings */
+.drawer-back { position: fixed; inset: 0; background: hsl(220 30% 5% / .35); z-index: 20; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(640px, 100vw); background: var(--bg); z-index: 21; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; }
+.drawer-head { padding: var(--s4) var(--s6); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: var(--s3); background: var(--panel); }
+.drawer-head h3 { margin: 0; font-size: var(--t16); } .drawer-head .x { margin-left: auto; }
+.drawer-tabs { display: flex; gap: var(--s1); padding: var(--s2) var(--s6) 0; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.drawer-tabs button { border: 0; background: transparent; padding: var(--s2) var(--s3); font: 600 var(--t14)/1 inherit; color: var(--text-2); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+.drawer-tabs button[aria-selected="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
+.drawer-body { flex: 1; overflow: auto; padding: var(--s6); }
+.drawer-foot { padding: var(--s3) var(--s6); border-top: 1px solid var(--line); background: var(--panel); display: flex; gap: var(--s2); align-items: center; }
+.group { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-sm); margin-bottom: var(--s4); }
+.group > summary, .group > .gh { list-style: none; padding: var(--s3) var(--s4); font-weight: 650; cursor: pointer; display: flex; align-items: center; gap: var(--s2); }
+.group > summary::-webkit-details-marker { display: none; }
+.group > summary::after { content: "›"; margin-left: auto; color: var(--text-3); transition: transform .15s; } .group[open] > summary::after { transform: rotate(90deg); }
+.group .gsub { font-weight: 400; color: var(--text-3); font-size: var(--t12); }
+.group.essential { border: 1px solid var(--accent-soft); } .group.essential > .gh { color: var(--accent-text); cursor: default; }
+.field { display: grid; grid-template-columns: 200px 1fr; gap: var(--s2) var(--s4); padding: var(--s3) var(--s4); border-top: 1px solid var(--line); align-items: center; }
+.field label { font-weight: 600; font-size: var(--t14); } .field .about { grid-column: 2; color: var(--text-3); font-size: var(--t12); margin-top: -4px; }
+.field .changed { color: var(--accent-text); }
+.secret { display: flex; gap: var(--s1); } .secret input { flex: 1; }
+.switch { position: relative; display: inline-block; vertical-align: middle; width: 36px; height: 20px; flex: none; } .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 999px; transition: background .15s; cursor: pointer; }
+.switch span::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: white; border-radius: 50%; transition: transform .15s; box-shadow: var(--shadow-sm); }
+.switch input:checked + span { background: var(--accent); } .switch input:checked + span::before { transform: translateX(16px); }
+.ext-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s2); padding: var(--s3) var(--s4); border-top: 1px solid var(--line); }
+.ext { display: flex; align-items: center; gap: var(--s2); font-size: var(--t12); } .ext.opt b { font-weight: 400; color: var(--text-2); }
+.list-row { display: flex; gap: var(--s3); align-items: center; padding: var(--s3) var(--s4); border-top: 1px solid var(--line); }
+.list-row:hover { background: var(--panel-2); } .list-row .grow { flex: 1; min-width: 0; } .list-row .desc { color: var(--text-3); font-size: var(--t12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secnote { font-size: var(--t12); color: var(--text-3); padding: var(--s2) var(--s4) var(--s3); border-top: 1px solid var(--line); display: flex; gap: var(--s2); }
+.jobs { position: fixed; bottom: var(--s6); left: var(--s6); z-index: 15; display: grid; gap: var(--s2); width: 340px; }
+.job { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: var(--s3) var(--s4); display: flex; align-items: center; gap: var(--s3); }
+.job .grow { flex: 1; min-width: 0; } .job b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast { position: fixed; bottom: var(--s6); right: var(--s6); background: var(--text); color: var(--bg); padding: var(--s3) var(--s4); border-radius: 8px; box-shadow: var(--shadow-lg); font-weight: 600; opacity: 0; transform: translateY(8px); transition: all .2s ease-out; pointer-events: none; z-index: 40; max-width: 420px; }
 .toast.show { opacity: 1; transform: none; }
-@media (max-width: 640px) {
-  header { flex-wrap: wrap; gap: var(--s2); padding: var(--s3) var(--s4); }
-  .summary { margin-left: 0; width: 100%; }
-  nav { overflow-x: auto; }
-  main { padding: var(--s6) var(--s4); }
-  .cards { grid-template-columns: 1fr; }
-  th:nth-child(4), td:nth-child(4) { display: none; }
+@media (max-width: 720px) {
+  header { flex-wrap: wrap; gap: var(--s2); padding: var(--s3) var(--s4); } .summary { margin-left: 0; width: 100%; } nav { overflow-x: auto; max-width: 100%; }
+  main { padding: var(--s6) var(--s4); } .cards { grid-template-columns: 1fr; } .field { grid-template-columns: 1fr; } .field .about { grid-column: 1; }
+  .jobs { left: var(--s4); right: var(--s4); width: auto; }
 }
 </style>
 </head>
@@ -167,6 +127,7 @@ pre.log { margin: 0; padding: var(--s4); height: 60vh; overflow: auto; font: 12p
     <button role="tab" data-tab="dumps">Dumps</button>
     <button role="tab" data-tab="logs">Logs</button>
     <button role="tab" data-tab="mail">Mail</button>
+    <button role="tab" data-tab="settings">Settings</button>
   </nav>
   <div class="summary" id="summary"></div>
 </header>
@@ -175,206 +136,487 @@ pre.log { margin: 0; padding: var(--s4); height: 60vh; overflow: auto; font: 12p
   <div class="notes" id="notes"></div>
 
   <section data-panel="sites">
-    <div class="section-head"><h2>Sites</h2><p id="sites-sub"></p></div>
+    <div class="section-head"><h2>Sites</h2><p id="sites-sub"></p><div class="right"><button class="btn primary" id="new-site">New site from GitHub</button></div></div>
     <div class="cards" id="sites"></div>
   </section>
 
   <section data-panel="services" class="hidden">
     <div class="section-head"><h2>Services</h2><p>Native Windows builds, listening on 127.0.0.1 only</p></div>
     <table><thead><tr><th>Service</th><th>Version</th><th class="num">Port</th><th class="num">Memory</th><th></th></tr></thead><tbody id="services"></tbody></table>
-    <div class="section-head" style="margin-top:var(--s8)"><h2>Processes</h2><p>Everything tez keeps running, restarted automatically if it stops</p></div>
+    <div class="section-head" style="margin-top:var(--s8)"><h2>Processes</h2><p>Everything tez keeps running; restarted automatically if it stops</p></div>
     <table><thead><tr><th>Process</th><th>State</th><th class="num">Uptime</th><th class="num">Memory</th><th></th></tr></thead><tbody id="procs"></tbody></table>
   </section>
 
   <section data-panel="php" class="hidden">
-    <div class="section-head"><h2>PHP</h2><p>Official windows.php.net builds. Change with <code>tez use 8.4</code> or <code>tez isolate 8.1</code></p></div>
+    <div class="section-head"><h2>PHP</h2><p>Official windows.php.net builds</p><div class="right"><button class="btn" id="php-all">Settings for all versions</button></div></div>
     <table><thead><tr><th>Version</th><th>Release</th><th>Used by</th><th></th></tr></thead><tbody id="php"></tbody></table>
   </section>
 
   <section data-panel="dumps" class="hidden">
-    <div class="section-head"><h2>Dumps</h2><p id="dumps-sub">Every <code>dump()</code> and <code>dd()</code>, newest first</p>
-      <button class="btn ghost" style="margin-left:auto" id="clear-dumps">Clear</button></div>
+    <div class="section-head"><h2>Dumps</h2><p id="dumps-sub">Every <code>dump()</code> and <code>dd()</code>, newest first</p><div class="right"><button class="btn ghost" id="clear-dumps">Clear</button></div></div>
     <div id="dumps"></div>
   </section>
 
   <section data-panel="logs" class="hidden">
     <div class="log-wrap">
-      <div class="log-bar"><select id="log-pick"></select><span class="muted" id="log-path"></span>
-        <label class="muted" style="margin-left:auto"><input type="checkbox" id="log-follow" checked> Follow</label></div>
+      <div class="log-bar"><select id="log-pick" style="width:auto"></select><label class="muted" style="margin-left:auto"><input type="checkbox" id="log-follow" checked> Follow</label></div>
       <pre class="log" id="log"></pre>
     </div>
   </section>
 
-  <section data-panel="mail" class="hidden">
-    <div class="empty" id="mail-box"></div>
+  <section data-panel="mail" class="hidden"><div class="empty" id="mail-box"></div></section>
+
+  <section data-panel="settings" class="hidden">
+    <div class="section-head"><h2>Settings</h2><p>Saved to <code id="cfg-path"></code></p></div>
+    <div id="settings"></div>
   </section>
 </main>
+
+<div class="jobs" id="jobs"></div>
 <div class="toast" id="toast"></div>
+<div id="drawer-root"></div>
 
 <script>
-const H = { 'X-Tez': 'dashboard' };
-let S = null, tab = (location.hash || '#sites').slice(1), logName = null;
+const H = { 'X-Tez': 'dashboard', 'Content-Type': 'application/json' };
+let S = null, tab = (location.hash || '#sites').slice(1), logName = null, drawerOpen = false;
+const watched = new Set();
 const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const mb = b => !b ? '' : b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : Math.round(b / (1 << 20)) + ' MB';
 const up = s => !s ? '' : s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm';
-const toast = msg => { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 1800); };
-async function post(path, msg) {
-  const r = await fetch(path, { method: 'POST', headers: H });
+const toast = msg => { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600); };
+const get = p => fetch(p).then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.statusText); return j; });
+async function post(path, body, msg) {
+  const r = await fetch(path, { method: 'POST', headers: H, body: JSON.stringify(body || {}) });
   const j = await r.json().catch(() => ({}));
-  toast(r.ok ? msg : (j.error || 'Failed'));
-  setTimeout(refresh, 400);
+  if (!r.ok) { toast(j.error || 'Failed'); throw new Error(j.error || 'failed'); }
+  if (j.job) watchJob(j.job);
+  if (j.warning || j.warnings) toast(j.warning || j.warnings); else if (msg) toast(msg);
+  setTimeout(refresh, 300);
+  return j;
 }
+const randomSecret = (n = 40) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return [...a].map(b => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join(''); };
 
 function show(name) {
   tab = name; history.replaceState(null, '', '#' + name);
-  document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === name));
-  document.querySelectorAll('[data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+  $$('nav button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === name));
+  $$('[data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
   if (name === 'logs') loadLog();
   if (name === 'dumps') loadDumps();
+  if (name === 'settings') renderSettings();
 }
-document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
+$$('nav button').forEach(b => b.onclick = () => show(b.dataset.tab));
+const procState = name => S.procs.find(p => p.name === name);
 
-function procState(name) { return S.procs.find(p => p.name === name); }
+/* ---------- reusable form pieces ---------- */
+function switchEl(id, on, attrs = '') { return `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''} ${attrs}><span></span></label>`; }
+function secretInput(id, value, opts = {}) {
+  return `<div class="secret"><input type="password" id="${id}" value="${esc(value)}" autocomplete="off" spellcheck="false" ${opts.readonly ? 'readonly' : ''}>
+    <button class="btn ghost sm" type="button" data-reveal="${id}" title="Show or hide">Show</button>
+    <button class="btn ghost sm" type="button" data-copy="${id}" title="Copy">Copy</button>
+    ${opts.generate ? `<button class="btn ghost sm" type="button" data-generate="${id}" data-kind="${opts.generate}" title="Generate a new value">Generate</button>` : ''}</div>`;
+}
+function wireSecrets(root) {
+  $$('[data-reveal]', root).forEach(b => b.onclick = () => { const i = $('#' + b.dataset.reveal, root); i.type = i.type === 'password' ? 'text' : 'password'; b.textContent = i.type === 'password' ? 'Show' : 'Hide'; });
+  $$('[data-copy]', root).forEach(b => b.onclick = async () => { await navigator.clipboard.writeText($('#' + b.dataset.copy, root).value); toast('Copied'); });
+  $$('[data-generate]', root).forEach(b => b.onclick = () => {
+    const i = $('#' + b.dataset.generate, root);
+    i.value = b.dataset.kind === 'appkey' ? 'base64:' + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))) : randomSecret(b.dataset.kind === 'short' ? 20 : 40);
+    i.type = 'text'; i.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+function drawer(title, sub, tabs, onClose) {
+  drawerOpen = true;
+  $('#drawer-root').innerHTML = `<div class="drawer-back"></div><aside class="drawer" role="dialog" aria-label="${esc(title)}">
+    <div class="drawer-head"><div><h3>${esc(title)}</h3><div class="muted" style="font-size:12px">${sub || ''}</div></div><button class="btn ghost x" id="d-close">Close</button></div>
+    ${tabs.length > 1 ? `<div class="drawer-tabs">${tabs.map((t, i) => `<button data-dt="${i}" aria-selected="${i === 0}">${esc(t.title)}</button>`).join('')}</div>` : ''}
+    <div class="drawer-body" id="d-body"></div><div class="drawer-foot" id="d-foot"></div></aside>`;
+  const close = () => { drawerOpen = false; $('#drawer-root').innerHTML = ''; onClose && onClose(); refresh(); };
+  $('.drawer-back').onclick = close; $('#d-close').onclick = close;
+  const open = i => { $$('[data-dt]').forEach(b => b.setAttribute('aria-selected', +b.dataset.dt === i)); $('#d-foot').innerHTML = ''; tabs[i].render($('#d-body'), $('#d-foot')); };
+  $$('[data-dt]').forEach(b => b.onclick = () => open(+b.dataset.dt));
+  document.onkeydown = e => { if (e.key === 'Escape' && drawerOpen) close(); };
+  open(0);
+  return close;
+}
 
+/* ---------- jobs ---------- */
+function watchJob(id) { watched.add(id); pollJobs(); }
+async function pollJobs() {
+  if (!watched.size) { $('#jobs').innerHTML = ''; return; }
+  const j = await get('/api/jobs').catch(() => ({ jobs: [] }));
+  const list = j.jobs.filter(x => watched.has(x.id));
+  $('#jobs').innerHTML = list.map(x => `<div class="job"><span class="dot ${x.state === 'running' ? 'backoff' : x.state === 'done' ? 'running' : 'failed'}"></span>
+    <div class="grow"><b>${esc(x.title)}</b><span class="muted">${esc(x.state)}</span></div>
+    <button class="btn ghost sm" data-joblog="${x.id}">Log</button>${x.state !== 'running' ? `<button class="btn ghost sm" data-jobx="${x.id}">✕</button>` : ''}</div>`).join('');
+  $$('[data-joblog]').forEach(b => b.onclick = () => { logName = 'job:' + b.dataset.joblog; show('logs'); });
+  $$('[data-jobx]').forEach(b => b.onclick = () => { watched.delete(+b.dataset.jobx); pollJobs(); });
+  if (list.some(x => x.state === 'running')) setTimeout(pollJobs, 1500); else refresh();
+}
+
+/* ---------- overview ---------- */
 function renderSummary() {
   const run = S.procs.filter(p => p.state === 'running').length, bad = S.procs.filter(p => p.state === 'failed' || p.state === 'backoff').length;
   $('#ver').textContent = 'v' + S.version;
-  $('#summary').innerHTML =
-    `<span class="pill ${bad ? 'warn' : 'ok'}"><span class="dot ${bad ? 'backoff' : 'running'}"></span>${run} running${bad ? ` · ${bad} restarting` : ''}</span>` +
-    `<span>${mb(S.memory)} in use</span>`;
+  $('#summary').innerHTML = `<span class="pill ${bad ? 'warn' : 'ok'}"><span class="dot ${bad ? 'backoff' : 'running'}"></span>${run} running${bad ? ` · ${bad} restarting` : ''}</span><span>${mb(S.memory)} in use</span>`;
   $('#notes').innerHTML = (S.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('');
 }
 
 function renderSites() {
   const el = $('#sites');
-  $('#sites-sub').textContent = S.sites.length ? `${S.sites.length} site${S.sites.length > 1 ? 's' : ''} · folders in your parked paths are served automatically` : '';
-  if (!S.sites.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sites yet</h3><p>Put a project in <code>%USERPROFILE%\\Sites</code>, or run <code>tez link</code> inside one.</p></div>`;
-    return;
-  }
+  $('#sites-sub').textContent = S.sites.length ? `${S.sites.length} site${S.sites.length > 1 ? 's' : ''}` : '';
+  if (!S.sites.length) { el.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>No sites yet</h3><p>Clone one from GitHub, put a project in <code>%USERPROFILE%\\Sites</code>, or run <code>tez link</code> inside one.</p></div>`; return; }
   el.innerHTML = S.sites.map(s => {
     const procs = Object.entries(s.processes || {});
-    const chips = procs.map(([n, why]) => {
-      const p = procState(`${s.name}/${n}`);
-      const st = p ? p.state : 'stopped';
-      return `<span class="chip" title="${esc(why)}"><span class="dot ${st}"></span>${esc(n)}</span>`;
-    }).join('');
-    const horizon = procs.some(([n]) => n === 'horizon');
+    const chips = procs.map(([n, why]) => { const p = procState(`${s.name}/${n}`); return `<span class="chip" title="${esc(why)}"><span class="dot ${p ? p.state : 'stopped'}"></span>${esc(n)}</span>`; }).join('');
     return `<article class="card">
-      <div class="card-top">
-        <div style="min-width:0"><div class="name">${esc(s.name)}</div><div class="sub" title="${esc(s.path)}">${esc(s.path)}</div></div>
-        <div class="right"><span class="pill" title="${s.isolated ? 'Pinned with tez isolate' : 'From composer.json or the default'}">PHP ${esc(s.php)}${s.isolated ? ' · pinned' : ''}</span></div>
-      </div>
-      <div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url.replace('https://', ''))}</a>
-        <span class="muted"> · </span><a href="${esc(s.localhost)}" target="_blank" rel="noopener" class="muted">.localhost</a></div>
+      <div class="card-top"><div style="min-width:0"><div class="name">${esc(s.name)}</div><div class="sub" title="${esc(s.path)}">${esc(s.path)}</div></div>
+        <div class="right"><span class="pill ${s.isolated ? 'accent' : ''}">PHP ${esc(s.php)}</span></div></div>
+      <div><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url.replace('https://', ''))}</a> <span class="muted">·</span> <a class="muted" href="${esc(s.localhost)}" target="_blank" rel="noopener">.localhost</a></div>
       ${chips ? `<div class="chips">${chips}</div>` : `<div class="muted">${s.laravel ? 'No background processes needed' : 'Static or plain PHP site'}</div>`}
       <div class="actions">
         <a class="btn primary" href="${esc(s.url)}" target="_blank" rel="noopener">Open</a>
-        ${procs.length ? (s.up
-          ? `<button class="btn" data-site="${esc(s.name)}" data-act="down">Stop processes</button>`
-          : `<button class="btn" data-site="${esc(s.name)}" data-act="up">Start processes</button>`) : ''}
-        ${horizon ? `<a class="btn ghost" href="${esc(s.url)}/horizon" target="_blank" rel="noopener">Horizon</a>` : ''}
-        ${s.laravel ? `<button class="btn ghost" data-sitelog="${esc(s.name)}">Laravel log</button>` : ''}
-      </div>
-    </article>`;
+        ${procs.length ? (s.up ? `<button class="btn" data-site="${esc(s.name)}" data-act="down">Stop processes</button>` : `<button class="btn" data-site="${esc(s.name)}" data-act="up">Start processes</button>`) : ''}
+        <button class="btn ghost" data-settings="${esc(s.name)}">Settings</button>
+        ${procs.some(([n]) => n === 'horizon') ? `<a class="btn ghost" href="${esc(s.url)}/horizon" target="_blank" rel="noopener">Horizon</a>` : ''}
+      </div></article>`;
   }).join('');
-  el.querySelectorAll('[data-act]').forEach(b => b.onclick = () => { b.disabled = true; post(`/api/site/${b.dataset.site}/${b.dataset.act}`, b.dataset.act === 'up' ? 'Starting processes' : 'Stopping processes'); });
-  el.querySelectorAll('[data-sitelog]').forEach(b => b.onclick = () => { logName = 'site:' + b.dataset.sitelog; show('logs'); });
+  $$('[data-act]', el).forEach(b => b.onclick = () => { b.disabled = true; post(`/api/site/${b.dataset.site}/${b.dataset.act}`, {}, b.dataset.act === 'up' ? 'Starting processes' : 'Stopping processes'); });
+  $$('[data-settings]', el).forEach(b => b.onclick = () => siteSettings(b.dataset.settings));
 }
 
-function procRow(p, label) {
-  const link = p.url ? `<a class="btn ghost" href="${esc(p.url)}" target="_blank" rel="noopener">Open</a>` : '';
-  const toggle = p.state === 'running' || p.state === 'backoff'
-    ? `<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="stop">Stop</button>`
-    : `<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="start">Start</button>`;
-  return `<div class="row-actions">${link}<button class="btn ghost" data-proc="${esc(p.name)}" data-pact="restart">Restart</button>${toggle}<button class="btn ghost" data-logof="${esc(p.name)}">Log</button></div>`;
+function procButtons(p) {
+  const link = p.url ? `<a class="btn ghost sm" href="${esc(p.url)}" target="_blank" rel="noopener">Open</a>` : '';
+  const toggle = p.state === 'running' || p.state === 'backoff' ? `<button class="btn ghost sm" data-proc="${esc(p.name)}" data-pact="stop">Stop</button>` : `<button class="btn ghost sm" data-proc="${esc(p.name)}" data-pact="start">Start</button>`;
+  return `${link}<button class="btn ghost sm" data-proc="${esc(p.name)}" data-pact="restart">Restart</button>${toggle}<button class="btn ghost sm" data-logof="${esc(p.name)}">Log</button>`;
+}
+function wireProcButtons(root) {
+  $$('[data-pact]', root).forEach(b => b.onclick = () => post(`/api/proc/${b.dataset.proc}/${b.dataset.pact}`, {}, `${b.dataset.pact} ${b.dataset.proc}`));
+  $$('[data-logof]', root).forEach(b => b.onclick = () => { logName = b.dataset.logof; show('logs'); });
 }
 
 function renderServices() {
   $('#services').innerHTML = S.services.map(sv => {
     const p = procState(sv.name);
-    const st = !sv.installed ? 'not installed' : !sv.enabled ? 'disabled' : p ? p.state : 'stopped';
-    return `<tr>
-      <td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p ? p.state : ''}"></span><div><b>${esc(sv.title)}</b><div class="muted" style="font-size:12px">${esc(sv.about)}</div></div></div></td>
-      <td>${esc(sv.version)} <span class="muted">${st === 'running' ? '' : '· ' + esc(st)}</span></td>
+    const st = !sv.installed ? 'not installed' : !sv.enabled ? 'off' : p ? p.state : 'stopped';
+    return `<tr><td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p ? p.state : ''}"></span><div><b>${esc(sv.title)}</b><div class="muted" style="font-size:12px">${esc(sv.about)}</div></div></div></td>
+      <td>${esc(sv.full_version || sv.version)} ${st === 'running' ? '' : `<span class="muted">· ${esc(st)}</span>`}</td>
       <td class="num">${sv.port}</td><td class="num">${p ? mb(p.memory) : ''}</td>
-      <td>${p ? procRow(p) : sv.installed ? '' : `<span class="muted mono">tez service install ${esc(sv.name)}</span>`}</td></tr>`;
+      <td><div class="row-actions">${p ? procButtons(p) : ''}<button class="btn sm" data-svc="${esc(sv.name)}">${sv.installed ? 'Settings' : 'Install'}</button></div></td></tr>`;
   }).join('');
-  $('#procs').innerHTML = S.procs.map(p => `<tr>
-      <td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p.state}"></span><span class="mono">${esc(p.name)}</span></div></td>
+  $('#procs').innerHTML = S.procs.map(p => `<tr><td><div style="display:flex;gap:10px;align-items:center"><span class="dot ${p.state}"></span><span class="mono">${esc(p.name)}</span></div></td>
       <td>${esc(p.state)}${p.restarts ? ` <span class="muted">· ${p.restarts} restart${p.restarts > 1 ? 's' : ''}</span>` : ''}${p.state !== 'running' && p.last_exit ? `<div class="muted" style="font-size:12px">${esc(p.last_exit)}</div>` : ''}</td>
-      <td class="num">${up(p.uptime)}</td><td class="num">${mb(p.memory)}</td><td>${procRow(p)}</td></tr>`).join('');
-  document.querySelectorAll('[data-pact]').forEach(b => b.onclick = () => post(`/api/proc/${b.dataset.proc}/${b.dataset.pact}`, `${b.dataset.pact} ${b.dataset.proc}`));
-  document.querySelectorAll('[data-logof]').forEach(b => b.onclick = () => { logName = b.dataset.logof; show('logs'); });
+      <td class="num">${up(p.uptime)}</td><td class="num">${mb(p.memory)}</td><td><div class="row-actions">${procButtons(p)}</div></td></tr>`).join('');
+  wireProcButtons($('[data-panel=services]'));
+  $$('[data-svc]').forEach(b => b.onclick = () => serviceSettings(b.dataset.svc));
 }
 
 function renderPhp() {
   $('#php').innerHTML = S.php.map(v => {
     const users = S.sites.filter(s => s.php === v.minor).map(s => s.name);
     const workers = S.procs.filter(p => p.name.startsWith(`php-${v.minor}-`));
-    const running = workers.filter(p => p.state === 'running').length;
-    return `<tr><td><b>PHP ${esc(v.minor)}</b> ${v.default ? '<span class="pill ok">default</span>' : ''}</td>
-      <td class="mono">${esc(v.version)}</td>
-      <td>${users.length ? esc(users.join(', ')) : '<span class="muted">no sites</span>'}</td>
-      <td class="muted">${workers.length ? `${running}/${workers.length} workers` : ''}</td></tr>`;
-  }).join('') + `<tr><td colspan="4" class="muted">Xdebug is ${S.xdebug ? '<b>on</b>' : 'off'} · <code>tez xdebug on</code> · <code>tez ext install &lt;name&gt; --php all</code> adds any PECL extension</td></tr>`;
+    return `<tr><td><b>PHP ${esc(v.minor)}</b> ${v.default ? '<span class="pill ok">default</span>' : ''}</td><td class="mono">${esc(v.version)}</td>
+      <td>${users.length ? esc(users.join(', ')) : '<span class="muted">no sites</span>'}${workers.length ? `<div class="muted" style="font-size:12px">${workers.filter(p => p.state === 'running').length}/${workers.length} workers</div>` : ''}</td>
+      <td><div class="row-actions"><button class="btn sm" data-phpset="${esc(v.minor)}">Settings &amp; extensions</button></div></td></tr>`;
+  }).join('');
+  $$('[data-phpset]').forEach(b => b.onclick = () => phpSettings(b.dataset.phpset));
 }
 
+/* ---------- site settings ---------- */
+const SECRET_HINT = 'Kept only in this project\'s .env file; tez sends it nowhere but 127.0.0.1 and never logs it.';
+async function siteSettings(name) {
+  let d;
+  try { d = await get(`/api/site/${name}`); } catch (e) { return toast(e.message); }
+  const phpOptions = (sel) => ['', ...S.php.map(v => v.minor), ...['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5', '8.6'].filter(m => !S.php.some(v => v.minor === m))]
+    .map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${m ? 'PHP ' + m + (S.php.some(v => v.minor === m) ? '' : ' (installs it)') : 'Automatic (composer.json / default)'}</option>`).join('');
+  drawer(name, `${esc(d.path)} · <a href="${esc(d.url)}" target="_blank">${esc(d.url)}</a>`, [
+    { title: 'Essentials', render: (body, foot) => {
+      body.innerHTML = `<div class="group essential"><div class="gh">Most used</div>
+        <div class="field"><label>PHP version</label><select id="f-php">${phpOptions(d.isolated ? d.php : '')}</select><div class="about">Now PHP ${esc(d.php)}. Pin a version or let composer.json decide.</div></div>
+        <div class="field"><label>Background processes</label><div>${switchEl('f-up', d.up)}</div><div class="about">Run the processes below (what Sail ran as extra containers).</div></div>
+        ${d.processes.map(p => `<div class="field"><label>${esc(p.name)}</label><div>${switchEl('p-' + p.name, p.on, `data-proc-name="${esc(p.name)}"`)}</div><div class="about">${esc(p.about)}${p.reason ? ` · ${esc(p.reason)}` : ''}${p.command ? `<br><code>${esc(p.command)}</code>` : ''}</div></div>`).join('')}
+        </div>
+        <details class="group" open><summary>Domains <span class="gsub">extra host names, for apps that route by domain</span></summary>
+          <div class="field"><label>Always</label><div class="mono">${esc(name)}.${esc(S.tld)} · ${esc(name)}.localhost</div></div>
+          <div class="field"><label>Extra domains</label><textarea id="f-domains" style="min-height:90px" placeholder="admin.myapp.test">${esc((d.domains || []).join('\n'))}</textarea><div class="about">One per line. Run <code>tez hosts</code> once after adding names outside .localhost.</div></div>
+        </details>
+        <details class="group"><summary>Project actions <span class="gsub">run in the background with a live log</span></summary>
+          <div class="list-row">${[['composer', 'install'], ['npm', 'install'], ['artisan', 'migrate', '--force'], ['artisan', 'optimize:clear'], ['artisan', 'icons:cache'], ['artisan', 'storage:link'], ['setup']].map(a => `<button class="btn sm" data-run='${esc(JSON.stringify(a))}'>${esc(a.join(' ').replace('--force', '').replace('artisan', 'php artisan').replace(/^setup$/, 'Full setup'))}</button>`).join(' ')}</div>
+        </details>`;
+      foot.innerHTML = `<button class="btn primary" id="save-ess">Save</button><span class="muted">Processes restart with the new settings.</span>`;
+      $$('[data-run]', body).forEach(b => b.onclick = () => post('/api/jobs', { args: JSON.parse(b.dataset.run), site: name, title: `${name}: ${b.textContent}` }));
+      $('#save-ess').onclick = async () => {
+        const processes = {}; $$('[data-proc-name]', body).forEach(i => { const p = d.processes.find(x => x.name === i.dataset.procName); if (i.checked !== p.on) processes[p.name] = i.checked; });
+        const domains = $('#f-domains').value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+        await post(`/api/site/${name}`, { php: $('#f-php').value || null, up: $('#f-up').checked, processes, domains }, 'Saved');
+        d = await get(`/api/site/${name}`);
+      };
+    } },
+    { title: 'Environment', render: (body, foot) => {
+      const changed = {};
+      body.innerHTML = `<p class="muted" style="margin-top:0">Every <code>.env</code> key, grouped. Secrets are masked. A backup is written to <code>.env.tez-backup</code> on save.</p>` +
+        d.env.map((g, gi) => `<details class="group" ${gi < 2 ? 'open' : ''}><summary>${esc(g.title)} <span class="gsub">${g.keys.length}</span></summary>
+          ${g.keys.map(k => `<div class="field"><label class="mono" title="${esc(k.key)}">${esc(k.key)}</label>${k.secret
+            ? secretInput('e-' + k.key, k.value, { generate: k.key === 'APP_KEY' ? 'appkey' : /REVERB_APP_(KEY|SECRET)|PUSHER_APP_(KEY|SECRET)/.test(k.key) ? 'short' : '' })
+            : `<input type="text" id="e-${esc(k.key)}" value="${esc(k.value)}" spellcheck="false">`}</div>`).join('')}
+          ${g.keys.some(k => k.secret) ? `<div class="secnote">🔒 ${SECRET_HINT}${g.title === 'Database' ? ' Local PostgreSQL trusts connections from 127.0.0.1, so this password is not checked here; keep it for parity with production.' : ''}</div>` : ''}
+          </details>`).join('') +
+        `<details class="group"><summary>Add a key</summary><div class="field"><label>Name</label><input type="text" id="new-key" placeholder="MY_SETTING"></div><div class="field"><label>Value</label><input type="text" id="new-val"></div></details>`;
+      wireSecrets(body);
+      $$('input[id^="e-"]', body).forEach(i => i.oninput = () => { changed[i.id.slice(2)] = i.value; $('#env-count').textContent = Object.keys(changed).length + ' changed'; });
+      foot.innerHTML = `<button class="btn primary" id="save-env">Save .env</button><span class="muted" id="env-count">No changes</span>`;
+      $('#save-env').onclick = async () => {
+        const nk = $('#new-key').value.trim(); if (nk) changed[nk] = $('#new-val').value;
+        if (!Object.keys(changed).length) return toast('Nothing changed');
+        await post(`/api/site/${name}/env`, { set: changed }, 'Saved .env — restart processes to apply');
+        d = await get(`/api/site/${name}`);
+      };
+    } },
+    { title: 'Horizon & Reverb', render: async (body) => {
+      body.innerHTML = '<p class="muted">Reading the configuration Laravel uses…</p>';
+      const [hz, rv, q] = await Promise.all(['horizon', 'reverb', 'queue'].map(k => get(`/api/site/${name}/config/${k}`).catch(() => null)));
+      const kv = (o, keys) => keys.filter(k => o && o[k] !== undefined).map(k => `<div class="field"><label class="mono">${esc(k)}</label><div class="mono">${esc(typeof o[k] === 'object' ? JSON.stringify(o[k]) : o[k])}</div></div>`).join('');
+      const sup = hz && hz.environments ? Object.entries(hz.environments).map(([env, sups]) => Object.entries(sups || {}).map(([sn, c]) => `<div class="field"><label>${esc(env)} · ${esc(sn)}</label><div class="mono" style="font-size:12px">${esc(Object.entries(c).map(([a, b]) => `${a}: ${JSON.stringify(b)}`).join('  '))}</div></div>`).join('')).join('') : '';
+      body.innerHTML = `
+        <details class="group" open><summary>Horizon <span class="gsub">from config/horizon.php after .env</span></summary>
+          ${hz && !hz.error ? kv(hz, ['prefix', 'use', 'path', 'domain', 'memory_limit', 'fast_termination', 'trim', 'waits']) + sup : `<div class="field"><div class="muted">Horizon is not installed in this project.</div></div>`}
+          <div class="secnote">Change supervisors, workers and memory in <code>config/horizon.php</code> (Config files tab) or the HORIZON_* keys under Environment. Horizon restarts when you save processes.</div></details>
+        <details class="group" open><summary>Reverb <span class="gsub">websocket server</span></summary>
+          ${rv && !rv.error && rv.servers ? Object.entries(rv.servers).map(([n, c]) => kv(Object.assign({ server: n }, c), ['server', 'host', 'port', 'hostname', 'max_request_size', 'scaling'])).join('') + (rv.apps && rv.apps.apps ? rv.apps.apps.map(a => kv(a, ['app_id', 'allowed_origins', 'ping_interval', 'max_message_size'])).join('') : '') : `<div class="field"><div class="muted">Reverb is not installed in this project.</div></div>`}
+          <div class="secnote">🔒 App key and secret are shown under Environment (REVERB_APP_KEY, REVERB_APP_SECRET), masked, with Generate.</div></details>
+        <details class="group"><summary>Queues</summary>${q && !q.error ? kv(q, ['default']) + (q.connections ? Object.entries(q.connections).map(([n, c]) => `<div class="field"><label>${esc(n)}</label><div class="mono" style="font-size:12px">${esc(c.driver || '')} ${esc(c.queue || '')} ${c.retry_after ? 'retry_after ' + c.retry_after : ''}</div></div>`).join('') : '') : ''}</details>`;
+    } },
+    { title: 'Config files', render: (body, foot) => {
+      const files = ['.env', 'tez.json', ...d.config_files.map(f => 'config/' + f)];
+      body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:12px"><select id="cf-pick">${files.map(f => `<option ${f === 'config/horizon.php' ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select></div>
+        <textarea id="cf-text" spellcheck="false"></textarea><p class="muted">Saving keeps a copy in <code>storage/tez-backups</code> and checks PHP files for syntax errors.</p>`;
+      const load = async () => { $('#cf-text').value = await fetch(`/api/site/${name}/file?path=${encodeURIComponent($('#cf-pick').value)}`).then(r => r.text()); };
+      $('#cf-pick').onchange = load; load();
+      foot.innerHTML = `<button class="btn primary" id="cf-save">Save file</button>`;
+      $('#cf-save').onclick = () => post(`/api/site/${name}/file`, { path: $('#cf-pick').value, content: $('#cf-text').value }, 'Saved');
+    } },
+  ]);
+}
+
+/* ---------- PHP settings ---------- */
+async function phpSettings(minor) {
+  const all = await get('/api/php');
+  const v = minor === 'all' ? null : all.versions.find(x => x.minor === minor);
+  const values = v ? v.values : Object.fromEntries(all.catalog.map(c => [c.key, all.all[c.key] ?? c.default]));
+  const cat = Object.fromEntries(all.catalog.map(c => [c.key, c]));
+  const groups = [
+    ['Essentials', ['memory_limit', 'max_execution_time', 'upload_max_filesize', 'post_max_size', 'display_errors'], true],
+    ['Limits', ['max_input_time', 'max_input_vars', 'max_file_uploads', 'default_socket_timeout', 'session.gc_maxlifetime']],
+    ['Errors', ['error_reporting', 'display_startup_errors', 'log_errors']],
+    ['Performance (OPcache and paths)', ['opcache.enable', 'opcache.enable_cli', 'opcache.memory_consumption', 'opcache.interned_strings_buffer', 'opcache.max_accelerated_files', 'opcache.validate_timestamps', 'opcache.revalidate_freq', 'opcache.jit', 'opcache.jit_buffer_size', 'realpath_cache_size', 'realpath_cache_ttl']],
+    ['Xdebug', ['xdebug.mode', 'xdebug.start_with_request', 'xdebug.client_port']],
+    ['Other', ['date.timezone', 'output_buffering', 'short_open_tag', 'allow_url_fopen']],
+  ];
+  const known = groups.flatMap(g => g[1]);
+  const custom = Object.keys(values).filter(k => !known.includes(k));
+  const field = k => `<div class="field"><label class="mono">${esc(k)}</label><input type="text" data-ini="${esc(k)}" value="${esc(values[k] ?? '')}" placeholder="${esc(cat[k] ? cat[k].default : '')}">${cat[k] ? `<div class="about">${esc(cat[k].about)} · default ${esc(cat[k].default) || 'empty'}</div>` : ''}</div>`;
+  const tabs = [{ title: 'Settings', render: (body, foot) => {
+    body.innerHTML = groups.map(([t, keys, ess]) => ess ? `<div class="group essential"><div class="gh">${t}</div>${keys.map(field).join('')}</div>`
+      : `<details class="group"><summary>${t}</summary>${keys.map(field).join('')}</details>`).join('') +
+      `<details class="group" ${custom.length ? 'open' : ''}><summary>Your own settings <span class="gsub">any php.ini directive</span></summary>${custom.map(field).join('')}
+        <div class="field"><label>Add</label><div style="display:flex;gap:8px"><input type="text" id="ini-new-k" placeholder="session.save_path"><input type="text" id="ini-new-v" placeholder="value"></div></div></details>`;
+    foot.innerHTML = `<button class="btn primary" id="ini-save">Save and restart PHP ${v ? v.minor : '(all)'}</button><span class="muted">Clear a field to go back to the default.</span>`;
+    $('#ini-save').onclick = () => {
+      const settings = {};
+      $$('[data-ini]', body).forEach(i => { const k = i.dataset.ini; const def = cat[k] ? cat[k].default : null; const now = values[k] ?? ''; if (i.value !== now) settings[k] = i.value === '' || i.value === def ? null : i.value; });
+      const nk = $('#ini-new-k').value.trim(); if (nk) settings[nk] = $('#ini-new-v').value;
+      post(`/api/php/${minor}`, { settings }, 'Saved; PHP restarted');
+    };
+  } }];
+  if (v) tabs.push({ title: 'Extensions', render: async (body, foot) => {
+    const ext = v.extensions;
+    body.innerHTML = `<div class="group essential"><div class="gh">Loaded by default</div><div class="ext-grid">${ext.filter(e => e.default).map(e => `<label class="ext">${switchEl('x-' + e.name, e.on, `data-ext="${esc(e.name)}"`)}<b>${esc(e.name)}</b></label>`).join('')}</div></div>
+      <div class="group"><div class="gh">Available, off</div><div class="ext-grid">${ext.filter(e => !e.default).map(e => `<label class="ext opt">${switchEl('x-' + e.name, e.on, `data-ext="${esc(e.name)}"`)}<b>${esc(e.name)}</b></label>`).join('')}</div></div>
+      <div class="group"><div class="gh">Install from PECL <span class="gsub">every extension with a Windows build</span></div>
+        <div class="field"><label>Search</label><input type="text" id="pecl-q" placeholder="imagick, igbinary, apcu, pcov, swoole…"></div><div id="pecl-list" style="max-height:260px;overflow:auto"></div></div>`;
+    foot.innerHTML = `<button class="btn primary" id="ext-save">Save and restart PHP ${v.minor}</button>`;
+    $('#ext-save').onclick = () => { const extensions = {}; $$('[data-ext]', body).forEach(i => { const e = ext.find(x => x.name === i.dataset.ext); if (i.checked !== e.on) extensions[e.name] = i.checked; }); post(`/api/php/${minor}`, { extensions }, 'Saved; PHP restarted'); };
+    const pecl = await get('/api/php/pecl').catch(() => ({ extensions: [] }));
+    const draw = () => { const q = $('#pecl-q').value.toLowerCase(); $('#pecl-list').innerHTML = pecl.extensions.filter(n => !q || n.includes(q)).slice(0, 80).map(n => `<div class="list-row"><span class="grow mono">${esc(n)}</span>${ext.some(e => e.name === n) ? '<span class="pill ok">installed</span>' : `<button class="btn sm" data-pecl="${esc(n)}">Install for ${v.minor}</button><button class="btn ghost sm" data-pecl-all="${esc(n)}">All versions</button>`}</div>`).join('');
+      $$('[data-pecl]').forEach(b => b.onclick = () => post(`/api/php/${minor}`, { install: b.dataset.pecl }));
+      $$('[data-pecl-all]').forEach(b => b.onclick = () => post(`/api/php/all`, { install: b.dataset.peclAll })); };
+    $('#pecl-q').oninput = draw; draw();
+  } });
+  drawer(v ? `PHP ${v.minor}` : 'PHP settings for every version', v ? `${esc(v.version)} · used by ${esc(v.sites.join(', ') || 'no sites')}` : 'A version\'s own settings win over these', tabs);
+}
+
+/* ---------- service settings ---------- */
+async function serviceSettings(key) {
+  const all = await get('/api/services');
+  const sv = all.services.find(s => s.name === key);
+  const tabs = [{ title: 'Essentials', render: (body, foot) => {
+    body.innerHTML = `<div class="group essential"><div class="gh">Service</div>
+      <div class="field"><label>Running</label><div>${switchEl('sv-on', sv.enabled)}</div><div class="about">Off stops it and keeps its data.</div></div>
+      <div class="field"><label>Port</label><input type="number" id="sv-port" value="${sv.port}" min="1025" max="65535"><div class="about">Listens on 127.0.0.1 only.</div></div>
+      <div class="field"><label>Version</label><div class="mono">${esc(sv.full_version || sv.version)}</div></div></div>
+      ${sv.versions && sv.versions.length ? `<details class="group" ${sv.installed ? '' : 'open'}><summary>${sv.installed ? 'Add another version' : 'Install'} <span class="gsub">versions run side by side on their own ports</span></summary>
+        <div class="list-row">${sv.versions.map(x => `<button class="btn sm" data-inst="${esc(x)}">${esc(sv.title.split(' ')[0])} ${esc(x)}</button>`).join(' ')}</div></details>`
+        : !sv.installed ? `<div class="group"><div class="list-row"><button class="btn primary" data-inst="${esc(sv.version)}">Install ${esc(sv.title)} ${esc(sv.version)}</button></div></div>` : ''}
+      ${sv.options.length ? `<details class="group" open><summary>Tuning</summary>${sv.options.map(o => `<div class="field"><label class="mono">${esc(o.key)}</label>${o.secret ? secretInput('so-' + o.key, o.value, { generate: 'long' }) : `<input type="text" id="so-${esc(o.key)}" value="${esc(o.value)}" placeholder="${esc(o.default)}">`}<div class="about">${esc(o.about)}</div></div>`).join('')}
+        ${sv.options.some(o => o.secret) ? `<div class="secnote">🔒 Stored in tez.json on this computer and passed to the service when it starts. Put the same value in each project's .env.</div>` : ''}</details>` : ''}
+      ${sv.kind === 'postgres' && sv.installed ? `<details class="group" open><summary>Extensions <span class="gsub">PostgreSQL ${esc(sv.version)}</span></summary>
+        ${(sv.extension_catalog || []).map(([n, about]) => { const have = (sv.extensions || []).find(e => e[0] === n); return `<div class="list-row"><div class="grow"><b>${esc(n)}</b> ${have ? `<span class="pill ok">${esc(have[1])}</span>` : ''}<div class="desc">${esc(about)}</div></div>
+          ${n === 'timescaledb' ? `<input type="text" id="ts-ver" placeholder="version, e.g. 2.14.2" style="width:150px">` : ''}<button class="btn sm" data-pgext="${esc(n)}">${have && n !== 'timescaledb' ? 'Reinstall' : 'Add'}</button></div>`; }).join('')}
+        <div class="secnote">Every build also has pgcrypto, hstore, citext, pg_trgm, uuid-ossp and the rest of contrib. Enable any of them with CREATE EXTENSION.</div></details>` : ''}
+      <details class="group"><summary>For your .env <span class="gsub">copy into a project</span></summary><pre class="log" style="height:auto;max-height:200px" id="sv-env">${esc(sv.env.map(([k, v]) => `${k}=${v}`).join('\n'))}</pre>
+        <div class="list-row"><button class="btn sm" id="sv-copy">Copy</button></div></details>`;
+    wireSecrets(body);
+    $$('[data-inst]', body).forEach(b => b.onclick = () => post(`/api/service/${sv.kind}`, { install: b.dataset.inst }));
+    $$('[data-pgext]', body).forEach(b => b.onclick = () => post(`/api/service/${key}`, { extension: b.dataset.pgext, extension_version: b.dataset.pgext === 'timescaledb' ? $('#ts-ver').value.trim() : '' }));
+    $('#sv-copy').onclick = async () => { await navigator.clipboard.writeText($('#sv-env').textContent); toast('Copied'); };
+    foot.innerHTML = sv.installed ? `<button class="btn primary" id="sv-save">Save and restart</button>` : '';
+    if (sv.installed) $('#sv-save').onclick = () => {
+      const options = {}; sv.options.forEach(o => { const i = $('#so-' + o.key); if (i && i.value !== o.value) options[o.key] = i.value === o.default ? null : i.value; });
+      post(`/api/service/${key}`, { enabled: $('#sv-on').checked, port: +$('#sv-port').value, options }, 'Saved');
+    };
+  } }];
+  drawer(sv.title, esc(sv.about), tabs);
+}
+
+/* ---------- global settings ---------- */
+async function renderSettings() {
+  const st = await get('/api/settings');
+  $('#cfg-path').textContent = st.home + '\\config\\tez.json';
+  const phpOpts = st.php_installed.map(m => `<option ${m === st.default_php ? 'selected' : ''}>${m}</option>`).join('');
+  $('#settings').innerHTML = `
+    <div class="group essential"><div class="gh">Essentials</div>
+      <div class="field"><label>Default PHP</label><select id="g-php">${phpOpts}</select><div class="about">For sites without a pinned version, and for <code>php</code> in a terminal outside a project.</div></div>
+      <div class="field"><label>Domain</label><input type="text" id="g-tld" value="${esc(st.tld)}"><div class="about">Sites answer on name.${esc(st.tld)} and always on name.localhost.</div></div>
+      <div class="field"><label>Sites folders</label><textarea id="g-parked" style="min-height:70px">${esc(st.parked.join('\n'))}</textarea><div class="about">Every folder inside these is a site. One per line.</div></div>
+      <div class="field"><label>Start with Windows</label><div>${switchEl('g-auto', st.autostart)}</div><div class="about">Starts tez and its tray icon when you sign in.</div></div>
+    </div>
+    <details class="group" open><summary>Developer tools</summary>
+      <div class="field"><label>Xdebug</label><div>${switchEl('g-xdebug', st.xdebug)}</div><div class="about">Step debugging on port 9003, started with the XDEBUG_TRIGGER cookie. Slows PHP while on.</div></div>
+      <div class="field"><label>Dumps</label><div>${switchEl('g-dumps', st.dumps)}</div><div class="about">Copies every dump() and dd() to the Dumps tab.</div></div>
+    </details>
+    <details class="group"><summary>Web server</summary>
+      <div class="field"><label>HTTP port</label><input type="number" id="g-http" value="${st.http_port}"></div>
+      <div class="field"><label>HTTPS port</label><input type="number" id="g-https" value="${st.https_port}"><div class="about">If a port is taken, tez uses 8088 / 8443 and says so at the top.</div></div>
+      <div class="field"><label>PHP workers</label><input type="number" id="g-workers" value="${st.php_workers}" min="1" max="10"><div class="about">php-cgi processes per version; each serves one request at a time.</div></div>
+    </details>
+    <details class="group"><summary>Security and HTTPS</summary>
+      <div class="field"><label>Local certificates</label><div>${st.ca_trusted ? '<span class="pill ok">trusted by Windows</span>' : '<span class="pill warn">not trusted yet</span>'} <button class="btn sm" data-job='["trust"]'>Trust (admin prompt)</button></div><div class="about">tez's own certificate authority signs every site's HTTPS certificate. It never leaves this computer.</div></div>
+      <div class="field"><label>Hosts file</label><div><button class="btn sm" data-job='["hosts"]'>Add missing sites (admin prompt)</button></div><div class="about">Needed for .${esc(st.tld)} names; .localhost works without it.</div></div>
+      <div class="secnote">🔒 The dashboard and API listen on 127.0.0.1 only, accept only their own host names, and refuse changes without tez's header, so web pages cannot reach them.</div>
+    </details>
+    <details class="group"><summary>Performance</summary>
+      <div class="field"><label>Disk</label><div>${mb(st.free_disk)} free on the tez drive</div><div class="about">Keep 20 GB or more free: Windows slows down on a full SSD.</div></div>
+      <div class="field"><label>Defender</label><div><button class="btn sm" data-job='["doctor","--fix"]'>Exclude tez and site folders (admin prompt)</button></div><div class="about">Real-time scanning of every PHP file read is the biggest PHP slowdown on Windows.</div></div>
+    </details>`;
+  $$('[data-job]').forEach(b => b.onclick = () => post('/api/jobs', { args: JSON.parse(b.dataset.job), title: b.textContent }));
+  const save = () => post('/api/settings', {
+    default_php: $('#g-php').value, tld: $('#g-tld').value, parked: $('#g-parked').value.split('\n').map(s => s.trim()).filter(Boolean),
+    autostart: $('#g-auto').checked, xdebug: $('#g-xdebug').checked, dumps: $('#g-dumps').checked,
+    http_port: +$('#g-http').value, https_port: +$('#g-https').value, php_workers: +$('#g-workers').value,
+  }, 'Settings saved');
+  $$('#settings input[type=checkbox]').forEach(i => i.onchange = save);
+  $$('#settings select').forEach(i => i.onchange = save);
+  $$('#settings input[type=text], #settings input[type=number], #settings textarea').forEach(i => i.onchange = save);
+}
+
+/* ---------- new site from GitHub ---------- */
+async function newSite() {
+  const ids = await get('/api/github/identities').catch(() => ({ accounts: [], ssh_hosts: [], routes: [] }));
+  drawer('New site from GitHub', 'Clone into your Sites folder and set it up: composer, npm, .env, database, migrations', [{ title: 'Clone', render: async (body, foot) => {
+    const acct = ids.accounts.find(a => a.active) || ids.accounts[0];
+    const routes = [...ids.ssh_hosts.map(h => ({ v: 'ssh:' + h.alias, l: `SSH · ${h.alias}${h.identity ? ' · ' + h.identity.split(/[\\/]/).pop() : ''}${h.key_exists === false ? ' (key missing)' : ''}` })),
+      ...ids.accounts.map(a => ({ v: 'gh:' + a.login, l: `HTTPS through gh · ${a.login}` }))];
+    body.innerHTML = `<div class="group essential"><div class="gh">Where from</div>
+      <div class="field"><label>GitHub account</label><select id="gh-acct">${ids.accounts.map(a => `<option value="${esc(a.login)}" ${a === acct ? 'selected' : ''}>${esc(a.login)}${a.active ? ' (active)' : ''}</option>`).join('') || '<option value="">Not signed in</option>'}</select><div class="about">Accounts signed in to the GitHub CLI (gh). Their tokens stay in gh's store.</div></div>
+      <div class="field"><label>Owner</label><select id="gh-owner"></select></div>
+      <div class="field"><label>Clone through</label><select id="gh-route">${routes.map(r => `<option value="${esc(r.v)}">${esc(r.l)}</option>`).join('')}</select><div class="about">From your gh accounts and ~/.ssh/config. tez picks the one that matches the account.</div></div>
+      <div class="field"><label>Folder name</label><input type="text" id="gh-name" placeholder="defaults to the repository name"></div></div>
+      <div class="group"><div class="gh">Repositories <input type="text" id="gh-q" placeholder="Search" style="margin-left:auto;width:220px"></div><div id="gh-repos" style="max-height:46vh;overflow:auto"><div class="list-row muted">Loading…</div></div></div>
+      <details class="group"><summary>Any git URL <span class="gsub">GitLab, Bitbucket, self-hosted, git@alias:owner/repo.git</span></summary>
+        <div class="field"><label>URL</label><input type="text" id="gh-url" placeholder="git@github.com:owner/repo.git"></div><div class="list-row"><button class="btn" id="gh-url-go">Clone URL</button></div></details>
+      <details class="group"><summary>Sign in another account <span class="gsub">personal access token</span></summary>
+        <div class="field"><label>Token</label>${secretInput('gh-token', '')}<div class="about">Needs the repo and read:org scopes.</div></div>
+        <div class="secnote">🔒 The token is handed straight to the GitHub CLI, which keeps it in Windows Credential Manager. tez never stores it, never shows it again, and never logs it.</div>
+        <div class="list-row"><button class="btn" id="gh-login">Sign in</button></div></details>`;
+    wireSecrets(body);
+    let repos = [];
+    const pickRoute = () => { const r = (ids.routes || []).find(x => x.login === $('#gh-acct').value); if (r) $('#gh-route').value = r.route; };
+    const loadOwners = async () => {
+      pickRoute();
+      const st = await get(`/api/github?account=${encodeURIComponent($('#gh-acct').value)}`).catch(e => ({ ok: false, error: e.message }));
+      $('#gh-owner').innerHTML = st.ok ? st.owners.map(o => `<option>${esc(o)}</option>`).join('') : '';
+      if (!st.ok) { $('#gh-repos').innerHTML = `<div class="list-row">${esc(st.error)}</div>`; return; }
+      loadRepos();
+    };
+    const loadRepos = async () => {
+      $('#gh-repos').innerHTML = '<div class="list-row muted">Loading…</div>';
+      const r = await get(`/api/github/repos/${encodeURIComponent($('#gh-owner').value)}?account=${encodeURIComponent($('#gh-acct').value)}`).catch(e => ({ repos: [], error: e.message }));
+      repos = r.repos || []; draw(r.error);
+    };
+    const draw = err => {
+      const q = $('#gh-q').value.toLowerCase();
+      const list = repos.filter(x => !q || x.name.toLowerCase().includes(q) || (x.description || '').toLowerCase().includes(q));
+      $('#gh-repos').innerHTML = err ? `<div class="list-row">${esc(err)}</div>` : list.map(x => `<div class="list-row"><div class="grow"><b>${esc(x.name)}</b> ${x.isPrivate ? '<span class="pill">private</span>' : ''} ${x.primaryLanguage ? `<span class="muted">${esc(x.primaryLanguage.name)}</span>` : ''}<div class="desc">${esc(x.description || '')}</div></div><button class="btn sm primary" data-clone="${esc(x.nameWithOwner)}">Clone</button></div>`).join('') || '<div class="list-row muted">No repositories</div>';
+      $$('[data-clone]').forEach(b => b.onclick = () => clone(b.dataset.clone));
+    };
+    const clone = repo => {
+      const route = $('#gh-route').value, name = $('#gh-name').value.trim();
+      const target = route.startsWith('ssh:') ? `git@${route.slice(4)}:${repo}.git` : repo;
+      const args = ['clone', target]; if (name) args.push(name);
+      post('/api/jobs', { args, title: `Clone ${repo}` });
+    };
+    $('#gh-acct').onchange = loadOwners; $('#gh-owner').onchange = loadRepos; $('#gh-q').oninput = () => draw();
+    $('#gh-url-go').onclick = () => { const u = $('#gh-url').value.trim(); if (u) post('/api/jobs', { args: ['clone', u, ...($('#gh-name').value.trim() ? [$('#gh-name').value.trim()] : [])], title: `Clone ${u}` }); };
+    $('#gh-login').onclick = async () => { await post('/api/github/login', { token: $('#gh-token').value }, 'Signed in'); $('#gh-token').value = ''; newSite(); };
+    if (ids.accounts.length) loadOwners(); else $('#gh-repos').innerHTML = '<div class="list-row">Sign in below, or install the GitHub CLI (winget install GitHub.cli) and run gh auth login.</div>';
+  } }]);
+}
+$('#new-site').onclick = newSite;
+
+/* ---------- logs, dumps, mail ---------- */
 function renderLogPick() {
   const pick = $('#log-pick');
-  const opts = [['daemon', 'tez daemon'], ...S.sites.filter(s => s.laravel).map(s => ['site:' + s.name, s.name + ' · laravel.log']), ...S.procs.map(p => [p.name, p.name])];
+  const opts = [['daemon', 'tez daemon'], ...[...watched].map(id => ['job:' + id, 'job ' + id]), ...S.sites.filter(s => s.laravel).map(s => ['site:' + s.name, s.name + ' · laravel.log']), ...S.procs.map(p => [p.name, p.name])];
   const cur = logName || pick.value || 'daemon';
+  if (!opts.some(o => o[0] === cur)) opts.unshift([cur, cur]);
   pick.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
   pick.onchange = () => { logName = pick.value; loadLog(); };
 }
-
 async function loadLog() {
   renderLogPick();
   const name = logName || $('#log-pick').value || 'daemon';
-  const url = name.startsWith('site:') ? `/api/sitelog/${encodeURIComponent(name.slice(5))}?n=400` : `/api/logs/${name}?n=400`;
+  const url = name.startsWith('site:') ? `/api/sitelog/${encodeURIComponent(name.slice(5))}?n=400` : name.startsWith('job:') ? `/api/jobs/${name.slice(4)}/log` : `/api/logs/${name}?n=400`;
   const text = await fetch(url).then(r => r.text()).catch(() => '');
-  const pre = $('#log'), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-  pre.textContent = text || 'Nothing logged yet.';
-  if (atBottom || $('#log-follow').checked) pre.scrollTop = pre.scrollHeight;
+  const pre = $('#log'); pre.textContent = text || 'Nothing logged yet.';
+  if ($('#log-follow').checked) pre.scrollTop = pre.scrollHeight;
 }
-
 async function loadDumps() {
   const text = await fetch('/api/dumps?n=80').then(r => r.text()).catch(() => '');
   const items = text.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
   const el = $('#dumps');
-  if (!items.length) {
-    el.innerHTML = `<div class="empty"><h3>No dumps yet</h3><p>Turn Dumps on with <code>tez dumps on</code>, then call <code>dump($value)</code> anywhere.<br>They show here as well as on the page.</p></div>`;
-    return;
-  }
-  el.innerHTML = items.map((d, i) => `<div class="dump"><div class="dump-head"><b>${esc(d.site)}</b><span>${esc(d.uri)}</span>
-    <span style="margin-left:auto" class="mono">${esc((d.file || '').split(/[\\/]/).slice(-2).join('/'))}:${d.line}</span>
-    <span>${new Date(d.time * 1000).toLocaleTimeString()}</span></div><iframe sandbox data-i="${i}"></iframe></div>`).join('');
-  // Dumps are rendered in sandboxed frames: no scripts, no access to this page or its API.
-  el.querySelectorAll('iframe').forEach(f => {
-    f.srcdoc = `<style>body{margin:8px;font:12px Consolas,monospace}</style>` + items[+f.dataset.i].html;
-    f.onload = () => { try { f.style.height = Math.min(600, f.contentDocument.body.scrollHeight + 20) + 'px'; } catch { f.style.height = '200px'; } };
-  });
+  if (!items.length) { el.innerHTML = `<div class="empty"><h3>No dumps yet</h3><p>Turn Dumps on in Settings, then call <code>dump($value)</code> anywhere. They show here as well as on the page.</p></div>`; return; }
+  el.innerHTML = items.map((d, i) => `<div class="dump"><div class="dump-head"><b>${esc(d.site)}</b><span>${esc(d.uri)}</span><span style="margin-left:auto" class="mono">${esc((d.file || '').split(/[\\/]/).slice(-2).join('/'))}:${d.line}</span><span>${new Date(d.time * 1000).toLocaleTimeString()}</span></div><iframe sandbox data-i="${i}"></iframe></div>`).join('');
+  // Dumps render in sandboxed frames: no scripts, no access to this page or its API.
+  $$('iframe', el).forEach(f => { f.srcdoc = `<style>body{margin:8px;font:12px Consolas,monospace}</style>` + items[+f.dataset.i].html; f.style.height = '160px'; });
 }
 $('#clear-dumps').onclick = async () => { await fetch('/api/dumps', { method: 'DELETE', headers: H }); loadDumps(); };
-
 function renderMail() {
-  const m = S.services.find(s => s.name === 'mailpit');
-  const p = procState('mailpit');
+  const m = S.services.find(s => s.name === 'mailpit'), p = procState('mailpit');
   $('#mail-box').innerHTML = p && p.state === 'running'
-    ? `<h3>Every email your apps send lands in Mailpit</h3><p>SMTP <code>127.0.0.1:${m.port}</code> · set <code>MAIL_HOST=127.0.0.1</code> and <code>MAIL_PORT=${m.port}</code></p><p><a class="btn primary" href="${esc(p.url)}" target="_blank" rel="noopener">Open inbox</a></p>`
-    : `<h3>Mailpit is not running</h3><p><code>tez service install mailpit</code></p>`;
+    ? `<h3>Every email your apps send lands in Mailpit</h3><p>SMTP <code>127.0.0.1:${m.port}</code> · <code>MAIL_HOST=127.0.0.1</code> <code>MAIL_PORT=${m.port}</code></p><p><a class="btn primary" href="${esc(p.url)}" target="_blank" rel="noopener">Open inbox</a></p>`
+    : `<h3>Mailpit is not running</h3><p>Install or start it under Services.</p>`;
 }
+$('#php-all').onclick = () => phpSettings('all');
 
 async function refresh() {
-  try {
-    S = await fetch('/api/status').then(r => r.json());
-  } catch { $('#summary').innerHTML = '<span class="pill bad">tez is not running</span>'; return; }
-  renderSummary(); renderSites(); renderServices(); renderPhp(); renderMail();
+  try { S = await get('/api/status'); } catch { $('#summary').innerHTML = '<span class="pill bad">tez is not running</span>'; return; }
+  renderSummary();
+  if (!drawerOpen) { renderSites(); renderServices(); renderPhp(); renderMail(); }
   if (tab === 'logs' && $('#log-follow').checked) loadLog();
 }
 refresh();
-show(['sites', 'services', 'php', 'dumps', 'logs', 'mail'].includes(tab) ? tab : 'sites');
+show(['sites', 'services', 'php', 'dumps', 'logs', 'mail', 'settings'].includes(tab) ? tab : 'sites');
 setInterval(() => { if (!document.hidden) refresh(); }, 2500);
 setInterval(() => { if (!document.hidden && tab === 'dumps') loadDumps(); }, 3000);
 </script>
