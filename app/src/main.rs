@@ -73,12 +73,25 @@ pub struct Tez {
     pub dumps_seen: usize,
     pub mail: Value,
     pub open_select: Option<String>,
+    /// What has been typed into the open long menu to filter it, and the focus that receives it.
+    pub combo_q: String,
+    pub combo_focus: Option<FocusHandle>,
     pub select_closed: Option<(String, Instant)>,
     /// Groups the user opened or closed, against their default.
     pub toggled: BTreeSet<String>,
     pub theme: String,
     pub dark_applied: Option<bool>,
     pub jump: bool,
+    /// The note shown the first time the window is closed: tez keeps running in the tray.
+    pub close_hint: bool,
+    /// The Remove site dialog: which site, what tez found about it, the choices, and a save in flight.
+    pub del_site: Option<String>,
+    pub del_preview: Value,
+    pub del_files: bool,
+    pub del_db: bool,
+    pub del_busy: bool,
+    /// Folders in a Sites folder that tez no longer serves (removed from tez, kept on disk).
+    pub hidden_sites: Value,
     pub job_open: Option<u64>,
     pub job_log: String,
     /// /api/metrics, /api/sites/metrics, /api/services/metrics (newer daemons).
@@ -108,6 +121,42 @@ struct MainWindow(Option<AnyWindowHandle>);
 impl Global for MainWindow {}
 
 static SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// A page asked for over the instance port (`go sites`, `go site:hello:logs`, `go settings:ports`),
+/// without bringing the window forward: used to check every page.
+static NAV_REQUEST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Open the page a `go` request names.
+fn navigate(cx: &mut App, target: &str) {
+    let mut parts = target.trim().splitn(3, ':');
+    let (a, b, c) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    {
+        let t = cx.global_mut::<Tez>();
+        t.settings_open = false;
+        t.jump = false;
+        t.close_hint = false;
+        t.del_site = None;
+        t.open_select = None;
+    }
+    match a {
+        "home" => go(cx, Page::Overview),
+        "sites" => go(cx, Page::Sites),
+        "site" => { cx.global_mut::<Tez>().site_tab = if c.is_empty() { "overview".into() } else { c.into() }; go(cx, Page::Site(b.to_string())); }
+        "new" => { if !b.is_empty() { cx.global_mut::<Tez>().new_source = b.to_string(); } go(cx, Page::NewSite); }
+        "services" => { if !b.is_empty() { cx.global_mut::<Tez>().svc_sel = b.to_string(); } go(cx, Page::Services); }
+        "php" => go(cx, Page::Php),
+        "dumps" => go(cx, Page::Dumps),
+        "mail" => go(cx, Page::Mail),
+        "logs" => go(cx, Page::Logs),
+        "settings" => { let t = cx.global_mut::<Tez>(); t.settings_open = true; t.settings_sec = b.to_string(); }
+        "close-note" => cx.global_mut::<Tez>().close_hint = true,
+        "remove" => { open_remove(cx, b.to_string()); if c == "files" { cx.global_mut::<Tez>().del_files = true; } }
+        "theme" => set_theme(cx, b.to_string()),
+        "open" => { let t = cx.global_mut::<Tez>(); t.open_select = Some(b.to_string()); t.combo_q = c.to_string(); }
+        _ => {}
+    }
+    refresh_now(cx, true);
+    cx.refresh_windows();
+}
 const INSTANCE_PORT: u16 = 7978;
 
 pub fn tez(cx: &App) -> &Tez { cx.global::<Tez>() }
@@ -120,8 +169,21 @@ pub fn notify(cx: &mut App, msg: impl Into<String>) {
     cx.refresh_windows();
 }
 
+/// Change one setting: the switch or choice shows the new value at once, and tez saves it in the
+/// background. A save that fails puts the old value back (the refresh after it) and says why.
+pub fn set_setting(cx: &mut App, key: &str, value: Value, ok: &'static str) {
+    let t = cx.global_mut::<Tez>();
+    if !t.settings.is_object() { t.settings = json!({}); }
+    t.settings[key] = value.clone();
+    cx.refresh_windows();
+    send(cx, "/api/settings".into(), json!({ key: value }), ok);
+}
+
 /// Send a change now (switches, menus, buttons).
 pub fn send(cx: &mut App, path: String, body: Value, ok: &'static str) {
+    // A settings change only needs the settings and status back, which is quick; the rest of the
+    // app catches up on the next regular refresh.
+    let settings_only = path == "/api/settings";
     cx.spawn(async move |cx| {
         let r = cx.background_executor().spawn(async move { api::post(&path, &body) }).await;
         let _ = cx.update(|cx| {
@@ -135,8 +197,19 @@ pub fn send(cx: &mut App, path: String, body: Value, ok: &'static str) {
                 Err(e) => e.clone(),
             };
             notify(cx, msg);
-            refresh_now(cx, true);
+            if settings_only { refresh_settings(cx) } else { refresh_now(cx, true) }
         });
+    })
+    .detach();
+}
+
+/// Fetch just the status and the settings, then redraw: the quick refresh after a settings change.
+pub fn refresh_settings(cx: &mut App) {
+    let mut w = want(cx, false);
+    w.settings = true;
+    cx.spawn(async move |cx| {
+        let f = cx.background_executor().spawn(async move { fetch(w) }).await;
+        let _ = cx.update(|cx| apply(cx, f));
     })
     .detach();
 }
@@ -182,6 +255,8 @@ pub fn go(cx: &mut App, page: Page) {
 #[derive(Default)]
 struct Want {
     full: bool,
+    /// Settings without the rest of a full refresh.
+    settings: bool,
     sites: Vec<String>,
     logs: Vec<String>,
     sitelog: Option<String>,
@@ -201,6 +276,7 @@ struct Fetched {
     php: Option<Value>,
     services: Option<Value>,
     identities: Option<Value>,
+    hidden: Option<Value>,
     sites: Vec<(String, Value)>,
     logs: Vec<(String, String)>,
     dumps: Option<Vec<Value>>,
@@ -247,11 +323,12 @@ fn fetch(w: Want) -> Fetched {
     let mut f = Fetched { status: Some(api::get("/api/status")), ..Default::default() };
     if !matches!(f.status, Some(Ok(_))) { return f; }
     f.jobs = api::get("/api/jobs").ok();
+    if w.full || w.settings { f.settings = api::get("/api/settings").ok(); }
     if w.full {
-        f.settings = api::get("/api/settings").ok();
         f.php = api::get("/api/php").ok();
         f.services = api::get("/api/services").ok();
         f.identities = api::get("/api/github/identities").ok();
+        f.hidden = api::get("/api/sites/hidden").ok();
         for n in &w.sites { if let Ok(v) = api::get(&format!("/api/site/{n}")) { f.sites.push((n.clone(), v)); } }
     }
     for name in w.logs { if let Ok(t) = api::get_text(&format!("/api/logs/{name}?n=200")) { f.logs.push((format!("proc:{name}"), t)); } }
@@ -279,6 +356,7 @@ fn apply(cx: &mut App, f: Fetched) {
     }
     if let Some(v) = f.jobs { t.jobs = v; }
     if let Some(v) = f.settings { t.settings = v; }
+    if let Some(v) = f.hidden { t.hidden_sites = v; }
     if let Some(v) = f.php { t.php = v; }
     if let Some(v) = f.services { t.services = v; }
     if let Some(v) = f.identities {
@@ -374,6 +452,7 @@ fn start_loop(cx: &mut App) {
         loop {
             let _ = cx.update(|cx| {
                 if SHOW_REQUESTED.swap(false, Ordering::SeqCst) { show_window(cx); }
+                if let Some(target) = NAV_REQUEST.lock().ok().and_then(|mut n| n.take()) { navigate(cx, &target); }
                 let actions = cx.global::<TrayHolder>().0.as_ref().map(|t| t.poll()).unwrap_or_default();
                 for a in actions { tray_action(cx, a); }
                 // Flush saves whose typing has paused.
@@ -484,13 +563,85 @@ fn show_window(cx: &mut App) {
         app_id: Some("dev.tez.app".into()),
         ..Default::default()
     };
-    match gpui_kit::open_window(options, cx, |_window, cx| cx.new(|_| TezView)) {
+    match gpui_kit::open_window(options, cx, |window, cx| {
+        // The first close explains that tez keeps running in the tray (with a Quit choice);
+        // after that, closing just hides the window.
+        window.on_window_should_close(cx, |_window, cx| {
+            if api::app_prefs()["close_hint_seen"].as_bool().unwrap_or(false) { return true; }
+            cx.global_mut::<Tez>().close_hint = true;
+            cx.refresh_windows();
+            false
+        });
+        cx.new(|_| TezView)
+    }) {
         Ok((h, _)) => {
             cx.global_mut::<MainWindow>().0 = Some(h);
             cx.activate(true);
         }
         Err(e) => eprintln!("tez: {e}"),
     }
+}
+
+/// Open the Remove site dialog and load what removing it would touch.
+pub fn open_remove(cx: &mut App, name: String) {
+    {
+        let t = cx.global_mut::<Tez>();
+        t.del_site = Some(name.clone());
+        t.del_preview = Value::Null;
+        t.del_files = false;
+        t.del_db = false;
+        t.del_busy = false;
+    }
+    set_local(cx, "del-confirm", String::new());
+    cx.spawn(async move |cx| {
+        let n2 = name.clone();
+        let r = cx.background_executor().spawn(async move { api::get(&format!("/api/site/{n2}/delete-preview")) }).await;
+        let _ = cx.update(|cx| {
+            let t = cx.global_mut::<Tez>();
+            if t.del_site.as_deref() != Some(name.as_str()) { return; }
+            t.del_preview = r.unwrap_or_else(|e| json!({ "error": e }));
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+    cx.refresh_windows();
+}
+
+/// Remove the site as chosen in the dialog.
+pub fn do_remove(cx: &mut App) {
+    let t = cx.global_mut::<Tez>();
+    let Some(name) = t.del_site.clone() else { return };
+    if t.del_busy { return; }
+    t.del_busy = true;
+    let body = json!({ "files": t.del_files, "database": t.del_db, "confirm": local(cx, "del-confirm").trim() });
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        let n2 = name.clone();
+        let r = cx.background_executor().spawn(async move { api::post(&format!("/api/site/{n2}/delete"), &body) }).await;
+        let _ = cx.update(|cx| {
+            match r {
+                Ok(v) => {
+                    let msg = v["removed"].as_str().map(|s| s.to_string()).unwrap_or_else(|| format!("{name} removed"));
+                    cx.global_mut::<Tez>().del_site = None;
+                    notify(cx, msg);
+                    go(cx, Page::Sites);
+                }
+                Err(e) => { cx.global_mut::<Tez>().del_busy = false; notify(cx, e); }
+            }
+            refresh_now(cx, true);
+        });
+    })
+    .detach();
+}
+
+/// Answer the first-close note: remember it, then close the window (tez stays in the tray) or quit.
+pub fn close_window(window: &mut Window, cx: &mut App, quit: bool) {
+    let mut prefs = api::app_prefs();
+    if !prefs.is_object() { prefs = json!({}); }
+    prefs["close_hint_seen"] = json!(true);
+    api::save_app_prefs(&prefs);
+    cx.global_mut::<Tez>().close_hint = false;
+    if quit { cx.quit(); } else { window.remove_window(); }
 }
 
 struct TezView;
@@ -508,7 +659,19 @@ fn main() {
     match std::net::TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
         Ok(listener) => {
             std::thread::spawn(move || {
-                for s in listener.incoming().flatten() { drop(s); SHOW_REQUESTED.store(true, Ordering::SeqCst); }
+                for mut s in listener.incoming().flatten() {
+                    // A bare connection (a second launch, `tez open`) shows the window; `go <page>`
+                    // only switches pages.
+                    use std::io::Read;
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(150)));
+                    let mut buf = [0u8; 256];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let msg = String::from_utf8_lossy(&buf[..n]).to_string();
+                    match msg.trim().strip_prefix("go ") {
+                        Some(target) => { if let Ok(mut q) = NAV_REQUEST.lock() { *q = Some(target.to_string()); } }
+                        None => SHOW_REQUESTED.store(true, Ordering::SeqCst),
+                    }
+                }
             });
         }
         Err(_) => {
@@ -532,7 +695,7 @@ fn main() {
         // Closing the window leaves tez in the tray; only the tray's Quit ends the app.
         cx.set_quit_mode(QuitMode::Explicit);
         let theme = api::app_prefs()["theme"].as_str().unwrap_or("system").to_string();
-        cx.set_global(Tez { theme, site_tab: "overview".into(), new_source: "github".into(), range: "1h".into(), settings_sec: "general".into(), ..Default::default() });
+        cx.set_global(Tez { theme, site_tab: "overview".into(), new_source: "github".into(), range: "1h".into(), settings_sec: "general".into(), combo_focus: Some(cx.focus_handle()), ..Default::default() });
         cx.set_global(MainWindow(None));
         cx.set_global(TrayHolder(tray::Tray::new()));
         apply_theme(cx, true);

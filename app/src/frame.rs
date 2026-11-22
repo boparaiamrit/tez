@@ -4,7 +4,7 @@
 
 use crate::pages;
 use crate::ui::*;
-use crate::{api, go, job, local, notify, refresh_now, restart_all, send, set_local, set_theme, tez, txt, Page, Tez};
+use crate::{api, do_remove, go, job, local, notify, open_remove, refresh_now, restart_all, send, set_local, set_setting, set_theme, tez, txt, Page, Tez};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -32,12 +32,112 @@ fn section(page: &Page) -> Section {
 
 // ------------------------------------------------------------------ the frame
 
+/// Remove a site: from tez only, or with its folder to the Recycle Bin, and optionally its database.
+/// Anything that cannot be undone from tez (the folder, the database) needs the name typed back.
+fn remove_dialog(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
+    let t = tez(cx);
+    let name = t.del_site.clone().unwrap_or_default();
+    let pv = t.del_preview.clone();
+    let (files, db, busy) = (t.del_files, t.del_db, t.del_busy);
+    let pp = *p;
+    let loaded = !pv.is_null();
+    let err = txt(&pv["error"]);
+    let path = txt(&pv["path"]);
+    let linked = pv["kind"] == "linked";
+    let trash = txt(&pv["trash"]);
+    let trash_ok = !trash.is_empty();
+    let bin = if trash_ok { trash.clone() } else if cfg!(target_os = "macos") || cfg!(target_os = "linux") { "Trash".into() } else { "Recycle Bin".into() };
+    let procs: Vec<String> = arr(&pv["processes"]).iter().map(txt).collect();
+    let dbv = pv["database"].clone();
+    let db_ok = dbv["local"].as_bool() == Some(true) && dbv["exists"].as_bool() == Some(true);
+    let db_name = txt(&dbv["name"]);
+    let size = pv["size_bytes"].as_u64().unwrap_or(0);
+    let needs_name = files || db;
+    let typed = local(cx, "del-confirm");
+    let typed_ok = typed.trim() == name;
+    let can = loaded && err.is_empty() && !busy && (!needs_name || typed_ok);
+
+    let option = |id: &'static str, on: bool, enabled: bool, title: String, body: String, pick: bool| {
+        div().id(id).flex().flex_row().items_start().gap(px(10.)).p(px(12.)).rounded(px(8.)).border_1()
+            .border_color(if on { pp.accent_hi } else { pp.line2 }).bg(if on { pp.accent_soft } else { pp.surface })
+            .when(!enabled, |d| d.opacity(0.5))
+            .child(div().mt(px(2.)).size(px(16.)).flex_none().rounded_full().border_1().border_color(if on { pp.text } else { pp.line2 }).flex().items_center().justify_center()
+                .when(on, |d| d.child(div().size(px(8.)).rounded_full().bg(pp.text))))
+            .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .child(div().text_size(px(13.)).text_color(pp.text3).child(body)))
+            .when(enabled, |d| d.on_click(move |_, _, cx| { let t = cx.global_mut::<Tez>(); t.del_files = pick; cx.refresh_windows(); }))
+    };
+
+    let mut body = div().flex().flex_col().gap(px(12.));
+    if !loaded {
+        body = body.child(skeleton_rows(p, 3, 44.));
+    } else if !err.is_empty() {
+        body = body.child(banner(p, Tone::Err, "triangle-alert", "tez could not look at this site", &err));
+    } else {
+        let keep_text = if linked { format!("Unlink it and stop its processes. The folder stays at {path}.") } else { format!("Stop serving it and stop its processes. The folder stays at {path}; Settings > General can serve it again.") };
+        let amount = if size < (1 << 20) { "Less than 1 MB".to_string() } else { format!("{}{}", mb(size), if pv["size_partial"].as_bool() == Some(true) { " or more" } else { "" }) };
+        let bin_text = if trash_ok { format!("{amount} goes to the {bin}, where you can restore it. Nothing is deleted outright.") }
+            else { format!("Not possible here: {}", txt(&pv["trash_blocked"])) };
+        body = body
+            .when(!procs.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(pp.text2).child(format!("Stops {} first.", procs.join(", ")))))
+            .when(pv["git_dirty"].as_bool() == Some(true), |d| d.child(banner(&pp, Tone::Warn, "git-branch", "Unsaved git work", &format!("{}. It goes wherever the folder goes.", txt(&pv["git_detail"])))))
+            .child(option("rm-keep", !files, true, if linked { "Unlink from tez".into() } else { "Remove from tez".into() }, keep_text, false))
+            .child(option("rm-files", files, trash_ok, format!("Also move the folder to the {bin}"), bin_text, true));
+        if db_ok {
+            body = body.child(div().id("rm-db").flex().flex_row().items_center().gap(px(10.)).px(px(2.))
+                .child(div().size(px(16.)).flex_none().rounded(px(4.)).border_1().border_color(if db { pp.red } else { pp.line2 }).bg(if db { pp.red } else { pp.surface }).flex().items_center().justify_center()
+                    .when(db, |d| d.child(icon("check", 12., pp.bg))))
+                .child(div().flex_1().min_w(px(0.)).text_size(px(13.5)).child(format!("Also drop the database {db_name} and {db_name}_testing. This cannot be undone.")))
+                .on_click(|_, _, cx| { let t = cx.global_mut::<Tez>(); t.del_db = !t.del_db; cx.refresh_windows(); }));
+        } else if !txt(&dbv["note"]).is_empty() {
+            body = body.child(div().text_size(px(13.)).text_color(pp.text3).child(format!("Database {db_name}: {}.", txt(&dbv["note"]))));
+        }
+        if needs_name {
+            let input = text_input(window, cx, "del-confirm", &typed, "Site name", false, Some(Rc::new(|v, cx| set_local(cx, "del-confirm", v))));
+            body = body.child(div().flex().flex_col().gap(px(6.))
+                .child(div().text_size(px(13.)).text_color(pp.text2).child(format!("Type {name} to confirm")))
+                .child(input_el(&input, true)));
+        }
+    }
+    let action = if busy { "Removing…".to_string() } else if files { format!("Move to {bin}") } else if linked { "Unlink".into() } else { "Remove".into() };
+    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center()
+        .child(div().absolute().top_0().left_0().size_full().bg(rgba(0x0000008c)))
+        .child(div().id("rm-dialog").occlude().w(px(540.)).max_h(relative(0.9)).p(px(20.)).flex().flex_col().gap(px(14.)).bg(pp.bg).border_1().border_color(pp.line2).rounded(px(12.)).shadow_lg()
+            .child(div().flex().flex_col().gap(px(2.))
+                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(format!("Remove {name}")))
+                .when(!path.is_empty(), |d| d.child(div().font_family(MONO).text_size(px(12.)).text_color(pp.text3).truncate().child(path.clone()))))
+            .child(body)
+            .child(div().pt(px(4.)).flex().flex_row().justify_end().gap(px(8.))
+                .child(button("rm-cancel", &pp, Kind::Secondary, false, None, Some("Cancel")).on_click(|_, _, cx| { cx.global_mut::<Tez>().del_site = None; cx.refresh_windows(); }))
+                .child(button("rm-go", &pp, Kind::Danger, false, if files { Some("trash-2") } else { None }, Some(&action))
+                    .when(!can, |d| d.opacity(0.45))
+                    .when(can, |d| d.on_click(|_, _, cx| do_remove(cx))))))
+        .into_any_element()
+}
+
+/// Shown the first time the window is closed: tez keeps running, and where to find it.
+fn close_note(p: &Pal) -> AnyElement {
+    let place = if cfg!(target_os = "macos") { "the menu bar" } else { "the tray, by the clock" };
+    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center()
+        .child(div().absolute().top_0().left_0().size_full().bg(rgba(0x0000008c)))
+        .child(div().id("close-note").occlude().w(px(420.)).p(px(20.)).flex().flex_col().gap(px(10.)).bg(p.bg).border_1().border_color(p.line2).rounded(px(12.)).shadow_lg()
+            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("tez keeps running"))
+            .child(div().text_size(px(13.5)).text_color(p.text2).child(format!("Your sites and services keep working. tez stays in {place}: click its icon to open this window again, or right-click it and choose Quit.")))
+            .child(div().pt(px(6.)).flex().flex_row().justify_end().gap(px(8.))
+                .child(button("close-quit", p, Kind::Secondary, true, None, Some("Quit tez app")).on_click(|_, window, cx| crate::close_window(window, cx, true)))
+                .child(button("close-ok", p, Kind::Primary, true, None, Some("Close window")).on_click(|_, window, cx| crate::close_window(window, cx, false)))))
+        .into_any_element()
+}
+
 pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
     let p = pal(cx);
     let t = tez(cx);
     let side_hidden = t.side_hidden;
     let settings_open = t.settings_open;
     let jump = t.jump;
+    let close_hint = t.close_hint;
+    let removing = t.del_site.is_some();
     let message = t.message.as_ref().map(|(m, _)| m.clone());
     let title = titlebar(&p, cx);
     let rail_el = rail(&p, cx);
@@ -45,11 +145,15 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
     let panel_el = panel(&p, window, cx);
     let sheet = if settings_open { Some(settings_sheet(&p, window, cx)) } else { None };
     let jump_el = if jump { Some(pages::jump_overlay(&p, window, cx)) } else { None };
-    div().size_full().relative().flex().flex_col().bg(p.side).text_color(p.text).font_family(SANS).text_size(px(15.))
+    let close_note_el = if close_hint { Some(close_note(&p)) } else { None };
+    let remove_el = if removing { Some(remove_dialog(&p, window, cx)) } else { None };
+    div().size_full().relative().flex().flex_col().bg(p.side).text_color(p.text).font_family(SANS).text_size(px(BODY))
         .child(title)
         .child(div().flex_1().min_h(px(0.)).flex().flex_row().child(rail_el).when_some(side, |d, s| d.child(s)).child(panel_el))
         .when_some(sheet, |d, s| d.child(s))
         .when_some(jump_el, |d, j| d.child(j))
+        .when_some(close_note_el, |d, c| d.child(c))
+        .when_some(remove_el, |d, c| d.child(c))
         .when_some(message, |d, m| d.child(div().absolute().bottom(px(22.)).right(px(22.)).max_w(px(460.)).px(px(16.)).py(px(11.))
             .rounded(px(12.)).bg(p.surface3).border_1().border_color(p.line2).shadow_lg().text_size(px(14.)).child(m)))
         .into_any_element()
@@ -57,7 +161,7 @@ pub fn root(window: &mut Window, cx: &mut App) -> AnyElement {
 
 fn icon_btn(id: impl Into<ElementId>, p: &Pal, name: &str, dim: bool, round: bool) -> Stateful<Div> {
     let pp = *p;
-    div().id(id).size(px(34.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+    div().id(id).size(px(34.)).flex_none().flex().items_center().justify_center()
         .rounded(if round { px(17.) } else { px(9.) }).when(round, |d| d.bg(pp.surface2))
         .hover(move |s| s.bg(pp.surface3))
         .child(icon(name, 18., if dim { p.text3 } else { p.text2 }))
@@ -85,7 +189,7 @@ fn titlebar(p: &Pal, cx: &App) -> Div {
             let is_open = open.as_deref() == Some(key);
             let k = key.to_string();
             let mut m = div().flex().flex_col()
-                .child(div().id(sid(format!("menu-{key}"))).px(px(10.)).py(px(4.)).rounded(px(6.)).text_size(px(14.)).cursor_pointer()
+                .child(div().id(sid(format!("menu-{key}"))).px(px(10.)).py(px(4.)).rounded(px(6.)).text_size(px(14.))
                     .text_color(if is_open { pp.text } else { pp.text2 }).when(is_open, |d| d.bg(pp.surface2))
                     .hover(move |s| s.bg(pp.surface2).text_color(pp.text))
                     .child(label)
@@ -169,14 +273,14 @@ fn menu_popover(p: &Pal, key: &str, cx: &App) -> Div {
     }
     let pp = *p;
     let k = key.to_string();
-    div().occlude().mt(px(if key == "status" { 4. } else { 40. })).min_w(px(260.)).p(px(6.)).rounded(px(14.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
+    div().occlude().mt(px(if key == "status" { 4. } else { 40. })).min_w(px(260.)).p(px(6.)).rounded(px(10.)).bg(p.surface2).border_1().border_color(p.line2).shadow_lg().flex().flex_col()
         .on_mouse_down_out(move |_, _, cx| { let t = cx.global_mut::<Tez>(); if t.menu_open.as_deref() == Some(k.as_str()) { t.menu_open = None; cx.refresh_windows(); } })
         .children(items.into_iter().enumerate().map(move |(i, it)| {
             let run = it.run.clone();
             div().flex().flex_col()
                 .when(it.sep_before && i > 0, |d| d.child(div().h(px(1.)).mx(px(8.)).my(px(5.)).bg(pp.line2)))
-                .child(div().id(sid(format!("mi-{i}"))).flex().flex_row().items_center().gap(px(12.)).h(px(36.)).px(px(12.)).rounded(px(9.)).cursor_pointer()
-                    .text_size(px(14.5)).hover(move |s| s.bg(pp.surface3))
+                .child(div().id(sid(format!("mi-{i}"))).flex().flex_row().items_center().gap(px(12.)).h(px(36.)).px(px(12.)).rounded(px(9.))
+                    .text_size(px(13.5)).hover(move |s| s.bg(pp.surface3))
                     .child(div().flex_1().child(it.label.clone()))
                     .when_some(it.hint.clone(), |d, h| d.child(div().text_size(px(13.)).text_color(pp.text3).child(h)))
                     .when(it.check, |d| d.child(icon("check", 15., pp.text)))
@@ -193,14 +297,14 @@ fn rail(p: &Pal, cx: &App) -> Div {
     let status_open = t.menu_open.as_deref() == Some("status");
     let pp = *p;
     let item = move |id: &str, ic: &str, on: bool, badge: bool, target: Page| {
-        div().id(sid(format!("rail-{id}"))).size(px(42.)).rounded(px(12.)).flex().items_center().justify_center().relative().cursor_pointer()
+        div().id(sid(format!("rail-{id}"))).size(px(42.)).rounded(px(12.)).flex().items_center().justify_center().relative()
             .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
             .child(icon(ic, 21., if on { pp.text } else { pp.text3 }))
             .when(badge, |d| d.child(div().absolute().top(px(8.)).right(px(8.)).size(px(8.)).rounded_full().bg(pp.text)))
             .on_click(move |_, _, cx| go(cx, target.clone()))
     };
     let mut status = div().flex().flex_col()
-        .child(div().id("rail-status").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center().cursor_pointer()
+        .child(div().id("rail-status").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center()
             .hover(move |s| s.bg(pp.surface2))
             .child(div().size(px(20.)).rounded_full().border_2().border_color(if online { pp.green } else { pp.text3 }).flex().items_center().justify_center()
                 .child(div().size(px(8.)).rounded_full().bg(if online { pp.green } else { pp.text3 })))
@@ -213,7 +317,7 @@ fn rail(p: &Pal, cx: &App) -> Div {
         .child(item("php", "code-xml", sec == Section::Php, false, Page::Php))
         .child(item("debug", "bug", sec == Section::Debug, new_dumps, Page::Dumps))
         .child(div().flex_1())
-        .child(div().id("rail-settings").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center().cursor_pointer()
+        .child(div().id("rail-settings").size(px(42.)).rounded(px(12.)).flex().items_center().justify_center()
             .hover(move |s| s.bg(pp.surface2)).child(icon("settings", 21., p.text3))
             .on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = true; cx.refresh_windows(); }))
         .child(status)
@@ -221,16 +325,16 @@ fn rail(p: &Pal, cx: &App) -> Div {
 
 fn side_item(id: String, p: &Pal, ic: Option<&str>, label: String, end: Option<String>, on: bool, sub: bool, target: Page) -> Stateful<Div> {
     let pp = *p;
-    div().id(sid(id)).flex().flex_row().items_center().gap(px(12.)).h(px(if sub { 34. } else { 38. })).pl(px(if sub { 46. } else { 10. })).pr(px(10.))
-        .rounded(px(10.)).cursor_pointer().text_size(px(if sub { 14.5 } else { 15. })).text_color(if sub { pp.text2 } else { pp.text })
+    div().id(sid(id)).flex().flex_row().items_center().gap(px(10.)).h(px(if sub { 28. } else { 32. })).pl(px(if sub { 38. } else { 10. })).pr(px(10.))
+        .rounded(px(6.)).text_size(px(if sub { 13. } else { BODY })).text_color(if sub { pp.text2 } else { pp.text })
         .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
-        .when_some(ic.map(|s| s.to_string()), |d, i| d.child(icon(&i, 18., pp.text2)))
+        .when_some(ic.map(|s| s.to_string()), |d, i| d.child(icon(&i, 16., pp.text2)))
         .child(div().flex_1().truncate().child(label))
         .when_some(end, |d, e| d.child(div().text_size(px(13.)).text_color(pp.text3).child(e)))
         .on_click(move |_, _, cx| go(cx, target.clone()))
 }
 
-fn side_sec(p: &Pal, label: &str) -> Div { div().px(px(10.)).pt(px(18.)).pb(px(6.)).text_size(px(15.)).text_color(p.text3).child(label.to_string()) }
+fn side_sec(p: &Pal, label: &str) -> Div { div().px(px(10.)).pt(px(14.)).pb(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text3).child(label.to_string()) }
 
 fn side_list(p: &Pal, cx: &App) -> Div {
     let t = tez(cx);
@@ -281,7 +385,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 let st = procs.iter().find(|x| txt(&x["name"]) == name).map(|x| txt(&x["state"])).unwrap_or_default();
                 let end = if installed { s["port"].as_u64().map(|x| format!(":{x}")) } else { Some("add".into()) };
                 let n2 = name.clone();
-                div().id(sid(format!("sv-{name}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.)).cursor_pointer()
+                div().id(sid(format!("sv-{name}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.))
                     .when(name == sel, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
                     .child(if installed { dot(if st == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 15., pp.text3).into_any_element() })
                     .child(div().flex_1().truncate().text_color(if installed { pp.text } else { pp.text2 }).child(txt(&s["title"])))
@@ -303,7 +407,7 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 let users = arr(&v["sites"]).len();
                 let m2 = minor.clone();
                 let on = minor == sel || (sel.is_empty() && v["default"] == true);
-                list = list.child(div().id(sid(format!("pv-{minor}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.)).cursor_pointer()
+                list = list.child(div().id(sid(format!("pv-{minor}"))).flex().flex_row().items_center().gap(px(12.)).h(px(38.)).px(px(10.)).rounded(px(10.))
                     .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
                     .child(icon("code-xml", 18., pp.text2))
                     .child(div().flex_1().child(format!("PHP {}", txt(&v["version"]))))
@@ -319,9 +423,9 @@ fn side_list(p: &Pal, cx: &App) -> Div {
                 .child(side_item("dg-logs".into(), p, Some("scroll-text"), "Logs".into(), None, page == Page::Logs, false, Page::Logs));
         }
     }
-    div().w(px(296.)).flex_none().flex().flex_col().pl(px(4.)).pr(px(10.)).pb(px(12.))
+    div().w(px(256.)).flex_none().flex().flex_col().pl(px(4.)).pr(px(10.)).pb(px(12.))
         .child(div().flex().flex_row().items_center().gap(px(6.)).pl(px(10.)).pr(px(4.)).pb(px(8.))
-            .child(div().flex_1().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().flex_1().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title))
             .child(icon_btn("side-search", p, "search", false, false).on_click(|_, _, cx| { cx.global_mut::<Tez>().jump = true; cx.refresh_windows(); })))
         .child(list)
 }
@@ -342,11 +446,13 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
             let tab = if t.site_tab.is_empty() || t.site_tab == "processes" { "overview".to_string() } else { t.site_tab.clone() };
             let s = arr(&t.status["sites"]).into_iter().find(|s| txt(&s["name"]) == *name).unwrap_or(Value::Null);
             let (url, path, path2) = (txt(&s["url"]), txt(&s["path"]), txt(&s["path"]));
+            let rm_name = name.clone();
             (Some(pill_seg("sitetab", p, &[("overview", "Overview"), ("environment", "Environment"), ("domains", "Domains"), ("config", "Config"), ("logs", "Logs")], &tab, Rc::new(|v, cx| { cx.global_mut::<Tez>().site_tab = v; refresh_now(cx, false); cx.refresh_windows(); }))),
              vec![
                 icon_btn("pt-open", p, "arrow-up-right", false, true).on_click(move |_, _, _| api::open_url(&url)).into_any_element(),
                 icon_btn("pt-term", p, "terminal", false, false).on_click(move |_, _, _| api::open_terminal(&path)).into_any_element(),
                 icon_btn("pt-code", p, "code-xml", false, false).on_click(move |_, _, _| api::open_editor(&path2)).into_any_element(),
+                icon_btn("pt-remove", p, "trash-2", false, false).on_click(move |_, _, cx| open_remove(cx, rm_name.clone())).into_any_element(),
              ])
         }
         _ => (None, vec![]),
@@ -356,7 +462,7 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     } else {
         match page {
             Page::Overview => home(p, cx),
-            Page::Sites => div().flex().flex_col().gap(px(30.)).child(div().flex().flex_col().gap(px(8.)).child(h1(p, "Sites")).child(sub(p, "Every folder in your Sites folders, at name.test and name.localhost."))).child(site_cards(p, cx)).into_any_element(),
+            Page::Sites => div().flex().flex_col().gap(px(22.)).child(div().flex().flex_col().gap(px(8.)).child(h1(p, "Sites")).child(sub(p, "Every folder in your Sites folders, at name.test and name.localhost."))).child(site_cards(p, cx)).into_any_element(),
             Page::Site(name) => site_view(p, &name, window, cx),
             Page::NewSite => pages::new_site(p, window, cx),
             Page::Services => pages::services_page(p, window, cx),
@@ -367,26 +473,26 @@ fn panel(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
             Page::Settings => { cx.global_mut::<Tez>().settings_open = true; home(p, cx) }
         }
     };
-    div().flex_1().min_w(px(0.)).mr(px(8.)).mb(px(8.)).rounded(px(14.)).bg(pp.bg).border_1().border_color(pp.line).flex().flex_col().overflow_hidden()
-        .child(div().h(px(64.)).flex_none().relative().flex().items_center().justify_center()
+    div().flex_1().min_w(px(0.)).mr(px(8.)).mb(px(8.)).rounded(px(10.)).bg(pp.bg).border_1().border_color(pp.line).flex().flex_col().overflow_hidden()
+        .child(div().h(px(48.)).flex_none().relative().flex().items_center().justify_center()
             .when_some(seg_el, |d, s| d.child(s))
-            .child(div().absolute().right(px(14.)).top(px(15.)).flex().flex_row().gap(px(8.)).children(right)))
+            .child(div().absolute().right(px(12.)).top(px(8.)).flex().flex_row().gap(px(6.)).children(right)))
         .child(div().id(sid(format!("panel-scroll-{:?}-{}", tez(cx).page, tez(cx).side_hidden))).flex_1().min_h(px(0.)).overflow_y_scroll()
-            .child(div().w_full().px(px(40.)).pt(px(6.)).pb(px(56.)).flex().flex_col().items_center()
-                .child(div().w_full().max_w(px(1000.)).flex().flex_col().gap(px(30.)).child(body))))
+            .child(div().w_full().px(px(32.)).pt(px(8.)).pb(px(40.)).flex().flex_col().items_start()
+                .child(div().w_full().max_w(px(1120.)).flex().flex_col().gap(px(22.)).child(body))))
         .into_any_element()
 }
 
 /// The rounded switch at the top of the panel.
 fn pill_seg(id: &str, p: &Pal, options: &[(&str, &str)], current: &str, on_pick: Pick) -> Div {
     let pp = *p;
-    div().flex().flex_row().p(px(3.)).rounded_full().bg(p.surface2)
+    div().flex().flex_row().p(px(2.)).gap(px(2.)).rounded(px(8.)).bg(p.surface2).border_1().border_color(p.line)
         .children(options.iter().map(|(v, l)| {
             let on = *v == current;
             let pick = on_pick.clone();
             let vv = v.to_string();
-            div().id(sid(format!("{id}-{v}"))).h(px(38.)).px(px(26.)).rounded_full().flex().items_center().cursor_pointer()
-                .text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(if on { pp.text } else { pp.text2 })
+            div().id(sid(format!("{id}-{v}"))).h(px(28.)).px(px(14.)).rounded(px(6.)).flex().items_center()
+                .text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(if on { pp.text } else { pp.text2 })
                 .when(on, |d| d.bg(pp.surface3).shadow_sm())
                 .child(l.to_string())
                 .on_click(move |_, _, cx| pick(vv.clone(), cx))
@@ -583,7 +689,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
     };
     let head = |title: &str, sub_t: String, big: String, small: String| div().flex().flex_row().items_start().px(px(18.)).pt(px(16.))
         .child(div().flex_1().flex().flex_col().gap(px(2.)).child(strong(&pp, title.to_string())).child(muted(&pp, sub_t)))
-        .child(div().flex().flex_col().items_end().gap(px(2.)).child(div().text_size(px(26.)).child(big)).child(muted(&pp, small)));
+        .child(div().flex().flex_col().items_end().gap(px(2.)).child(div().text_size(px(24.)).child(big)).child(muted(&pp, small)));
     // Where the CPU goes right now, the same way the Memory card splits RAM: tez, other apps, idle.
     let tez_now = cpu.clamp(0., 100.);
     let cpu_segs = [(tez_now, pp.series[0], "tez"), ((cpu_now - tez_now).max(0.), pp.line2, "Other apps"), ((100. - cpu_now.max(tez_now)).max(0.), pp.surface3, "Idle")];
@@ -623,7 +729,7 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
     pools.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal).then(b.1.cmp(&a.1)));
     let consumers = cardbox(p).pb(px(6.))
         .child(div().flex().flex_row().items_center().px(px(18.)).pt(px(16.)).pb(px(10.)).child(div().flex_1().child(strong(p, "Busiest in tez"))).child(div().w(px(70.)).flex().justify_end().child(muted(p, "CPU"))).child(div().w(px(80.)).flex().justify_end().child(muted(p, "RAM"))))
-        .children(pools.into_iter().take(6).map(|(name, mem, c)| div().flex().flex_row().items_center().px(px(18.)).py(px(9.)).border_t_1().border_color(pp.cardline).text_size(px(14.5))
+        .children(pools.into_iter().take(6).map(|(name, mem, c)| div().flex().flex_row().items_center().px(px(18.)).py(px(9.)).border_t_1().border_color(pp.cardline).text_size(px(13.5))
             .child(div().flex_1().min_w(px(0.)).truncate().child(name))
             .child(div().w(px(70.)).flex().justify_end().text_color(if c > 25. { pp.amber } else { pp.text }).child(format!("{c:.1}%")))
             .child(div().w(px(80.)).flex().justify_end().text_color(if mem > 1 << 30 { pp.amber } else { pp.text }).child(mb(mem)))));
@@ -632,9 +738,9 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
         .child(div().flex().flex_col().gap(px(2.)).px(px(18.)).pt(px(16.)).pb(px(8.)).child(strong(p, "Disk")).child(muted(p, "the drive that holds tez and your sites")))
         .when(disk_total > 0, |d| d.child(div().mx(px(18.)).my(px(6.)).h(px(8.)).rounded(px(4.)).bg(pp.surface3).overflow_hidden()
             .child(div().h_full().w(relative(1. - disk_free as f32 / disk_total as f32)).bg(if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text2 }))))
-        .child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(14.5)).child(div().text_color(if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text }).child("Free")).child(mb(disk_free)))
-        .when(disk_total > 0, |d| d.child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(14.5)).child(div().text_color(pp.text2).child("Size")).child(mb(disk_total))))
-        .when(cache > 0, |d| d.child(div().flex().flex_row().items_center().pl(px(18.)).pr(px(8.)).py(px(4.)).text_size(px(14.5))
+        .child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(13.5)).child(div().text_color(if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text }).child("Free")).child(mb(disk_free)))
+        .when(disk_total > 0, |d| d.child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(13.5)).child(div().text_color(pp.text2).child("Size")).child(mb(disk_total))))
+        .when(cache > 0, |d| d.child(div().flex().flex_row().items_center().pl(px(18.)).pr(px(8.)).py(px(4.)).text_size(px(13.5))
             .child(div().flex_1().text_color(pp.text2).child(format!("Download cache {}", mb(cache))))
             .child(text_btn("dk-clear", &pp, "Clear").on_click(|_, _, cx| send(cx, "/api/cache/clear".into(), json!({}), "Cleared the download cache")))));
     out = out.child(grid_of(vec![consumers.into_any_element(), disk_card.into_any_element()], 2));
@@ -684,7 +790,7 @@ fn site_view(p: &Pal, name: &str, window: &mut Window, cx: &mut App) -> AnyEleme
     let live: Vec<Value> = procs.iter().filter(|x| txt(&x["group"]) == format!("site:{name}")).cloned().collect();
     let laravel = s["laravel"].as_bool().unwrap_or(false);
     let head = div().flex().flex_col().gap(px(8.)).child(h1(p, name.to_string()))
-        .child(div().flex().flex_row().flex_wrap().items_center().gap(px(6.)).text_size(px(15.5)).text_color(p.text2)
+        .child(div().flex().flex_row().flex_wrap().items_center().gap(px(6.)).text_size(px(14.)).text_color(p.text2)
             .child(div().font_family(MONO).text_size(px(14.)).child(txt(&s["url"]).trim_start_matches("https://").to_string()))
             .child(format!("· PHP {} · {} ·", txt(&s["php"]), if laravel { "Laravel" } else { "PHP" }))
             .child(div().font_family(MONO).text_size(px(13.5)).text_color(p.text3).child(txt(&s["path"]))));
@@ -705,7 +811,7 @@ fn site_view(p: &Pal, name: &str, window: &mut Window, cx: &mut App) -> AnyEleme
         }
         _ => site_overview(p, name, &s, &d, &live, window, cx),
     };
-    div().flex().flex_col().gap(px(30.)).child(head).child(body).into_any_element()
+    div().flex().flex_col().gap(px(22.)).child(head).child(body).into_any_element()
 }
 
 fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], window: &mut Window, cx: &mut App) -> AnyElement {
@@ -715,11 +821,11 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
     let k2 = key.clone();
     let input = text_input(window, cx, &key, &local(cx, &key), "migrate, queue:retry all, test --parallel, or composer / npm …", false, Some(Rc::new(move |v, cx| set_local(cx, &k2, v))));
     let (n1, k3) = (name.to_string(), key.clone());
-    let runner = div().flex().flex_row().items_center().gap(px(10.)).h(px(54.)).pl(px(18.)).pr(px(8.)).rounded_full().bg(p.surface2)
+    let runner = div().flex().flex_row().items_center().gap(px(10.)).h(px(40.)).pl(px(12.)).pr(px(4.)).rounded(px(8.)).border_1().border_color(p.line2).bg(p.surface)
         .child(div().font_family(MONO).text_size(px(13.5)).text_color(p.text3).child("php artisan"))
         .child(div().flex_1().child(input_el(&input, true).appearance(false)))
-        .child(div().id("run-cmd").size(px(38.)).rounded_full().bg(p.text).flex().items_center().justify_center().cursor_pointer()
-            .child(icon("arrow-up", 17., p.bg))
+        .child(div().id("run-cmd").size(px(32.)).rounded(px(6.)).bg(p.accent).flex().items_center().justify_center().hover(|s| s.opacity(0.85))
+            .child(icon("corner-down-left", 15., p.bg))
             .on_click(move |_, _, cx| {
                 let line = local(cx, &k3).trim().to_string();
                 if line.is_empty() { notify(cx, "Type a command first"); return; }
@@ -732,7 +838,7 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
     let t = tez(cx);
     let job_log = if t.job_open.is_some() { t.job_log.clone() } else { String::new() };
     let mm = t.site_metrics["sites"][name].clone();
-    let mut out = div().flex().flex_col().gap(px(30.)).child(runner)
+    let mut out = div().flex().flex_col().gap(px(22.)).child(runner)
         .when(!job_log.is_empty(), |d| d.child(code_block(&pp, &job_log, 14)));
 
     // Performance
@@ -747,7 +853,7 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
         let p50: Vec<f64> = series.iter().map(|x| x["p50_ms"].as_f64().unwrap_or(0.)).collect();
         let p95: Vec<f64> = series.iter().map(|x| x["p95_ms"].as_f64().unwrap_or(0.)).collect();
         let e5: f64 = series.iter().filter_map(|x| x["e5xx"].as_f64()).sum();
-        let kpi = |v: String, l: &str| div().flex_1().flex().flex_col().gap(px(2.)).child(div().text_size(px(26.)).child(v)).child(muted(&pp, l.to_string()));
+        let kpi = |v: String, l: &str| div().flex_1().flex().flex_col().gap(px(2.)).child(div().text_size(px(24.)).child(v)).child(muted(&pp, l.to_string()));
         perf = perf.child(div().flex().flex_row().gap(px(16.)).px(px(18.)).pt(px(18.))
                 .child(kpi(mm["p95_ms"].as_f64().map(ms).unwrap_or("—".into()), "p95 response, 5 min"))
                 .child(kpi(p50.last().copied().map(ms).unwrap_or("—".into()), "p50 response"))
@@ -760,7 +866,7 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
         let routes = arr(&mm["routes"]);
         if !routes.is_empty() {
             perf = perf.child(div().flex().flex_row().gap(px(12.)).px(px(18.)).pt(px(22.)).pb(px(10.)).border_b_1().border_color(pp.line).text_size(px(13.5)).text_color(pp.text3)
-                .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(pp.text).text_size(px(15.)).child("Slowest routes")).child(div().w(px(70.)).child("Hits")).child(div().w(px(90.)).child("p95")).child(div().w(px(90.)).child("Worst")));
+                .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(pp.text).text_size(px(14.)).child("Slowest routes")).child(div().w(px(70.)).child("Hits")).child(div().w(px(90.)).child("p95")).child(div().w(px(90.)).child("Worst")));
             for r in routes.iter().take(8) {
                 let p95v = r["p95_ms"].as_f64().unwrap_or(0.);
                 perf = perf.child(div().flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(12.)).border_b_1().border_color(pp.line).text_size(px(14.))
@@ -825,6 +931,10 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
         .child(field(p, "Addresses", Some(format!("{name}.test and {name}.localhost always work")), false, div().text_color(pp.text2).child(if domains == 0 { "No extra domains".to_string() } else { format!("{domains} extra") })))
         .child(field(p, "Database", Some(env_val("DB_CONNECTION")), false, div().text_color(pp.text2).child(if db.is_empty() { "None set".into() } else { db })))
         .child(field(p, "Git", Some("Current branch".into()), false, div().font_family(MONO).text_color(pp.text2).child(branch))));
+    let rm = name.to_string();
+    out = out.child(div().flex().flex_col().child(group_title(p, "Remove", None))
+        .child(field(p, "Remove this site", Some("Stop serving it, or also move its folder to the Recycle Bin. You choose, then confirm.".into()), false,
+            button("site-remove", p, Kind::Danger, true, Some("trash-2"), Some("Remove…")).on_click(move |_, _, cx| open_remove(cx, rm.clone())))));
     out.into_any_element()
 }
 
@@ -843,19 +953,19 @@ fn settings_sheet(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     ];
     let search = text_input(window, cx, "setq", &q, "Search settings", false, Some(Rc::new(|v, cx| set_local(cx, "setq", v))));
     let mut nav = div().w(px(320.)).flex_none().flex().flex_col().gap(px(2.)).p(px(20.)).border_r_1().border_color(p.line)
-        .child(div().px(px(10.)).text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("Settings"))
-        .child(div().my(px(12.)).h(px(44.)).px(px(16.)).rounded_full().border_1().border_color(p.line2).flex().flex_row().items_center().gap(px(10.))
-            .child(icon("search", 16., p.text3)).child(div().flex_1().child(input_el(&search, false).appearance(false))));
+        .child(div().px(px(10.)).text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child("Settings"))
+        .child(div().my(px(10.)).h(px(32.)).px(px(10.)).rounded(px(6.)).border_1().border_color(p.line2).flex().flex_row().items_center().gap(px(8.))
+            .child(icon("search", 14., p.text3)).child(div().flex_1().child(input_el(&search, false).appearance(false))));
     for (g, items) in &groups {
         let shown: Vec<_> = items.iter().filter(|(_, l, _)| q.is_empty() || l.to_lowercase().contains(&q)).collect();
         if shown.is_empty() { continue; }
-        nav = nav.child(div().px(px(10.)).pt(px(16.)).pb(px(6.)).text_size(px(15.)).text_color(p.text3).child(g.to_string()));
+        nav = nav.child(div().px(px(10.)).pt(px(14.)).pb(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text3).child(g.to_string()));
         for (key, label, ic) in shown {
             let on = *key == sec;
             let k = key.to_string();
-            nav = nav.child(div().id(sid(format!("set-{key}"))).flex().flex_row().items_center().gap(px(12.)).h(px(40.)).px(px(10.)).rounded(px(10.)).cursor_pointer()
+            nav = nav.child(div().id(sid(format!("set-{key}"))).flex().flex_row().items_center().gap(px(10.)).h(px(32.)).px(px(10.)).rounded(px(6.))
                 .when(on, |d| d.bg(pp.surface3)).hover(move |s| s.bg(pp.surface2))
-                .child(icon(ic, 18., pp.text2)).child(label.to_string())
+                .child(icon(ic, 16., pp.text2)).child(label.to_string())
                 .on_click(move |_, _, cx| { cx.global_mut::<Tez>().settings_sec = k.clone(); cx.refresh_windows(); }));
         }
     }
@@ -863,12 +973,12 @@ fn settings_sheet(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     div().absolute().top_0().left_0().size_full().occlude()
         .child(div().id("sheet-dim").absolute().top_0().left_0().size_full().bg(rgba(0x0000008c))
             .on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = false; cx.refresh_windows(); }))
-        .child(div().id("sheet").occlude().absolute().top(px(56.)).bottom(px(36.)).left(px(56.)).right(px(56.)).flex().flex_row().bg(p.bg).border_1().border_color(p.line2).rounded(px(18.)).shadow_lg().overflow_hidden()
+        .child(div().id("sheet").occlude().absolute().top(px(56.)).bottom(px(36.)).left(px(56.)).right(px(56.)).flex().flex_row().bg(p.bg).border_1().border_color(p.line2).rounded(px(12.)).shadow_lg().overflow_hidden()
             .child(nav)
             .child(div().id("sheet-body").flex_1().min_w(px(0.)).relative().overflow_y_scroll()
                 .child(div().absolute().right(px(18.)).top(px(18.)).child(icon_btn("sheet-close", p, "x", false, false).on_click(|_, _, cx| { cx.global_mut::<Tez>().settings_open = false; cx.refresh_windows(); })))
                 .child(div().px(px(56.)).pt(px(48.)).pb(px(48.)).flex().flex_col().gap(px(8.))
-                    .child(div().text_size(px(32.)).child(title)).child(sub(p, lead)).child(div().mt(px(26.)).flex().flex_col().gap(px(30.)).child(body)))))
+                    .child(div().text_size(px(24.)).child(title)).child(sub(p, lead)).child(div().mt(px(26.)).flex().flex_col().gap(px(22.)).child(body)))))
         .into_any_element()
 }
 
@@ -878,7 +988,7 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
     let pp = *p;
     let trusted = s["ca_trusted"].as_bool().unwrap_or(false);
     let flag = |k: &str| s[k].as_bool().unwrap_or(false);
-    let toggle = |id: &'static str, key: &'static str, on: bool, ok: &'static str| switch(id, &pp, on).on_click(move |_, _, cx| send(cx, "/api/settings".into(), json!({ key: !on }), ok));
+    let toggle = |id: &'static str, key: &'static str, on: bool, ok: &'static str| switch(id, &pp, on).on_click(move |_, _, cx| set_setting(cx, key, json!(!on), ok));
     match sec {
         "appearance" => {
             let theme = if t.theme.is_empty() { "system".to_string() } else { t.theme.clone() };
@@ -908,7 +1018,7 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
             let cur = now.clone();
             let server_seg = seg_with("set-web", p, &servers, &now, &off, Rc::new(move |v, cx| {
                 if v == cur { return; }
-                send(cx, "/api/settings".into(), json!({ "web_server": v }), if v == "nginx" { "Nginx serves the sites now" } else { "Caddy serves the sites now" });
+                set_setting(cx, "web_server", json!(v), if v == "nginx" { "Nginx serves the sites now" } else { "Caddy serves the sites now" });
             }));
             let server_help = if nginx_ok { "Same sites, names and HTTPS with either. PHP is not touched.".to_string() } else { format!("Nginx is not available here. {why}") };
             ("Web server and ports".into(), "What serves your sites, and where it listens".into(), div().flex().flex_col().child(group_title(p, "Web server", None))
@@ -959,19 +1069,29 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
         }
         _ => {
             let installed: Vec<String> = arr(&s["php_installed"]).iter().map(txt).collect();
-            let php_sel = pages::select("defphp", p, cx, &txt(&s["default_php"]), installed.iter().map(|m| (m.clone(), format!("PHP {m}"))).collect(), 220., Rc::new(|v, cx| send(cx, "/api/settings".into(), json!({ "default_php": v }), "Default PHP changed")));
+            let php_sel = pages::select("defphp", p, cx, &txt(&s["default_php"]), installed.iter().map(|m| (m.clone(), format!("PHP {m}"))).collect(), 220., Rc::new(|v, cx| set_setting(cx, "default_php", json!(v), "Default PHP changed")));
             let tld = crate::draft(cx, "set:tld", txt(&s["tld"]));
             let tld_in = text_input(window, cx, "set:tld", &tld, "test", false, Some(Rc::new(|v, cx| crate::queue(cx, "set:tld".into(), v.clone(), "/api/settings".into(), json!({ "tld": v })))));
+            // Folders removed from tez but kept on disk: each can be served again.
+            let hidden = tez(cx).hidden_sites.clone();
+            let hidden_rows: Vec<AnyElement> = arr(&hidden["hidden"]).iter().map(|h| {
+                let (hn, hp) = (txt(&h["name"]), txt(&h["path"]));
+                let hp2 = hp.clone();
+                field(p, &format!("{hn} (hidden)"), Some(hp), false,
+                    button(sid(format!("unhide-{hn}")), p, Kind::Secondary, true, None, Some("Serve again")).on_click(move |_, _, cx| send(cx, "/api/sites/unhide".into(), json!({ "path": hp2 }), "Serving it again")))
+                    .into_any_element()
+            }).collect();
             let parked: Vec<String> = arr(&s["parked"]).iter().map(txt).collect();
             let folders = text_input(window, cx, "set:parked", &crate::draft(cx, "set:parked", parked.join("; ")), "", false, Some(Rc::new(|v, cx| {
                 let list: Vec<String> = v.split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
                 crate::queue(cx, "set:parked".into(), v.clone(), "/api/settings".into(), json!({ "parked": list }));
             })));
-            ("General".into(), "Defaults for every site on this computer".into(), div().flex().flex_col().gap(px(30.))
+            ("General".into(), "Defaults for every site on this computer".into(), div().flex().flex_col().gap(px(22.))
                 .child(div().flex().flex_col().child(group_title(p, "Defaults", None))
                     .child(field(p, "Default PHP", Some("For sites that do not ask for a version, and php in a terminal".into()), false, php_sel))
                     .child(field(p, "Domain ending", Some("Sites answer at name.<ending>, and always at name.localhost".into()), false, div().w(px(160.)).child(input_el(&tld_in, true))))
-                    .child(field(p, "Sites folders", Some("Every folder inside becomes a site. Separate several with ;".into()), false, div().w_full().child(input_el(&folders, true)))))
+                    .child(field(p, "Sites folders", Some("Every folder inside becomes a site. Separate several with ;".into()), false, div().w_full().child(input_el(&folders, true))))
+                    .children(hidden_rows))
                 .child(div().flex().flex_col().child(group_title(p, "Debugging", None))
                     .child(field(p, "Capture dump() and dd()", Some("Shows them under Dumps; the page still renders".into()), false, toggle("set-dumps", "dumps", flag("dumps"), "Saved")))
                     .child(field(p, "Xdebug", Some("Step debugging on port 9003. Slows PHP while on.".into()), false, toggle("set-xdebug", "xdebug", flag("xdebug"), "Saved; PHP restarted"))))
@@ -984,8 +1104,8 @@ fn settings_section(p: &Pal, sec: &str, window: &mut Window, cx: &mut App) -> (S
 fn card_header(p: &Pal, id: ElementId, ic: &str, title: &str, status: &str, tone: Tone, control: Option<AnyElement>, target: Option<Page>) -> Div {
     let fg = if tone == Tone::Neutral { p.text3 } else { p.tone(tone).0 };
     let clickable = target.is_some();
-    let name_el = div().id(id).flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).when(clickable, |d| d.cursor_pointer())
-        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).truncate().child(title.to_string()))
+    let name_el = div().id(id).flex_1().min_w(px(0.)).flex().flex_col().gap(px(3.)).when(clickable, |d| d)
+        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).truncate().child(title.to_string()))
         .child(div().flex().flex_row().items_center().gap(px(6.)).text_size(px(13.5)).text_color(fg).child(dot(fg)).child(div().truncate().child(status.to_string())))
         .when_some(target, |d, t| d.on_click(move |_, _, cx| go(cx, t.clone())));
     div().flex().flex_row().items_start().gap(px(12.)).px(px(16.)).pt(px(16.)).pb(px(12.))

@@ -7,6 +7,8 @@ use gpui_kit::*;
 use std::rc::Rc;
 
 pub const SANS: &str = if cfg!(windows) { "Segoe UI" } else if cfg!(target_os = "macos") { ".SystemUIFont" } else { "Inter" };
+/// Body text: 14 px is Windows' size, 13 px macOS's. Everything else is sized from the same scale.
+pub const BODY: f32 = if cfg!(target_os = "macos") { 13. } else { 14. };
 pub const MONO: &str = "JetBrains Mono";
 
 // ------------------------------------------------------------------ palette
@@ -41,6 +43,12 @@ pub struct Pal {
     pub series: [Hsla; 4],
     pub card: Hsla,
     pub cardline: Hsla,
+    /// A card's two shadow layers (near and far) and the faint top highlight dark cards get.
+    pub shadow1: Hsla,
+    pub shadow2: Hsla,
+    pub highlight: Hsla,
+    /// A switch's track when on.
+    pub toggle: Hsla,
 }
 
 fn c(x: u32) -> Hsla { rgb(x).into() }
@@ -53,7 +61,7 @@ impl Pal {
             // side = the window around the panel; bg/surface = the inset panel
             bg: c(0x212121), side: c(0x181818), surface: c(0x212121), surface2: c(0x2a2a2a), surface3: c(0x303030),
             line: c(0x2f2f2f), line2: c(0x3b3b3b),
-            text: c(0xececec), text2: c(0xb4b4b4), text3: c(0x8f8f8f),
+            text: c(0xececec), text2: c(0xb4b4b4), text3: c(0x969696),
             accent: c(0xececec), accent_hi: c(0x6b6b6b), accent_text: c(0x9ec5fe), accent_soft: ca(0xffffff14),
             green: c(0x4ade80), green_soft: ca(0x4ade801f),
             amber: c(0xfbbf24), amber_soft: ca(0xfbbf241f),
@@ -62,6 +70,8 @@ impl Pal {
             code: c(0x181818),
             series: [c(0x3987e5), c(0xd95926), c(0x199e70), c(0xc98500)],
             card: c(0x262626), cardline: c(0x323232),
+            shadow1: ca(0x00000080), shadow2: ca(0x00000047), highlight: ca(0xffffff0d),
+            toggle: c(0x2f74e0),
         }
     }
     pub fn light() -> Pal {
@@ -73,11 +83,14 @@ impl Pal {
             accent: c(0x0d0d0d), accent_hi: c(0x9b9b9b), accent_text: c(0x1d5fd6), accent_soft: ca(0x0000000d),
             green: c(0x15803d), green_soft: ca(0x15803d14),
             amber: c(0xa15c07), amber_soft: ca(0xd977061a),
-            red: c(0xdc2626), red_soft: ca(0xdc262612),
+            red: c(0xc81e1e), red_soft: ca(0xc81e1e12),
             blue: c(0x2563eb), blue_soft: ca(0x2563eb12),
             code: c(0xf5f5f5),
-            series: [c(0x2a78d6), c(0xeb6834), c(0x1baf7a), c(0xeda100)],
-            card: c(0xfafafa), cardline: c(0xe6e6e6),
+            series: [c(0x2a78d6), c(0xd65a26), c(0x138a60), c(0xb27900)],
+            // White cards on the white panel, lifted by a soft shadow and a hairline border.
+            card: c(0xffffff), cardline: ca(0x00000014),
+            shadow1: ca(0x1018280f), shadow2: ca(0x1018281c), highlight: ca(0x00000000),
+            toggle: c(0x2563eb),
         }
     }
     pub fn tone(&self, t: Tone) -> (Hsla, Hsla) {
@@ -129,20 +142,20 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
 
 pub fn t(s: impl Into<SharedString>) -> Div { div().child(s.into()) }
 
-pub fn muted(p: &Pal, s: impl Into<SharedString>) -> Div { div().text_size(px(14.)).text_color(p.text3).child(s.into()) }
+pub fn muted(p: &Pal, s: impl Into<SharedString>) -> Div { div().text_size(px(13.)).text_color(p.text3).child(s.into()) }
 
-pub fn sub(p: &Pal, s: impl Into<SharedString>) -> Div { div().text_size(px(15.5)).text_color(p.text2).child(s.into()) }
+pub fn sub(p: &Pal, s: impl Into<SharedString>) -> Div { div().text_size(px(13.5)).text_color(p.text3).child(s.into()) }
 
 pub fn mono(p: &Pal, s: impl Into<SharedString>) -> Div {
     div().font_family(MONO).text_size(px(12.5)).text_color(p.text2).child(s.into())
 }
 
 pub fn h1(p: &Pal, s: impl Into<SharedString>) -> Div {
-    div().text_size(px(30.)).font_weight(FontWeight::NORMAL).text_color(p.text).child(s.into())
+    div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(s.into())
 }
 
 pub fn h2(p: &Pal, s: impl Into<SharedString>) -> Div {
-    div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(s.into())
+    div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(s.into())
 }
 
 pub fn strong(p: &Pal, s: impl Into<SharedString>) -> Div {
@@ -166,12 +179,12 @@ pub fn button(id: impl Into<ElementId>, p: &Pal, kind: Kind, small: bool, icon_n
         Kind::Ghost => (clear, p.text2, clear, p.surface2),
         Kind::Danger => (p.surface, p.red, p.line2, p.red_soft),
     };
-    let h = if small { 30. } else { 36. };
-    let mut d = div().id(id).flex().flex_row().flex_none().items_center().justify_center().gap(px(7.)).h(px(h))
-        .rounded_full().border_1().border_color(border).bg(bg).text_color(fg)
-        .text_size(px(if small { 13.5 } else { 14.5 })).font_weight(FontWeight::MEDIUM).whitespace_nowrap()
-        .cursor_pointer().hover(move |s| s.bg(hover));
-    d = if label.is_some() { d.px(px(if small { 12. } else { 16. })) } else { d.w(px(h)) };
+    let h = if small { 28. } else { 32. };
+    let mut d = div().id(id).flex().flex_row().flex_none().items_center().justify_center().gap(px(6.)).h(px(h))
+        .rounded(px(6.)).border_1().border_color(border).bg(bg).text_color(fg)
+        .text_size(px(if small { 13. } else { BODY })).font_weight(FontWeight::MEDIUM).whitespace_nowrap()
+        .hover(move |s| s.bg(hover));
+    d = if label.is_some() { d.px(px(if small { 10. } else { 14. })) } else { d.w(px(h)) };
     if let Some(i) = icon_name { d = d.child(icon(i, 14., fg)); }
     if let Some(l) = label { d = d.child(SharedString::from(l.to_string())); }
     d
@@ -230,25 +243,25 @@ pub fn rows(p: &Pal, items: Vec<AnyElement>) -> Div {
 
 /// A setting: label and help on the left, the control on the right.
 pub fn field(p: &Pal, label: &str, help: Option<String>, mono_label: bool, control: impl IntoElement) -> Div {
-    div().flex().flex_row().flex_wrap().items_center().gap(px(20.)).px(px(18.)).py(px(15.))
-        .child(div().flex_1().min_w(px(220.)).flex().flex_col().gap(px(2.))
-            .child(div().text_size(px(if mono_label { 13.5 } else { 15. })).font_weight(FontWeight::MEDIUM).text_color(p.text)
+    div().flex().flex_row().items_center().gap(px(16.)).px(px(16.)).py(px(12.))
+        .child(div().flex_1().min_w(px(140.)).flex().flex_col().gap(px(2.))
+            .child(div().text_size(px(if mono_label { 13. } else { BODY })).font_weight(FontWeight::MEDIUM).text_color(p.text)
                 .when(mono_label, |d| d.font_family(MONO)).child(label.to_string()))
             .when_some(help, |d, h| d.child(muted(p, h))))
-        .child(div().w(px(320.)).flex().flex_row().justify_end().child(control))
+        .child(div().w(px(300.)).flex_none().flex().flex_row().justify_end().child(control))
 }
 
 pub fn switch(id: impl Into<ElementId>, p: &Pal, on: bool) -> Stateful<Div> {
-    div().id(id).w(px(40.)).h(px(24.)).flex_none().rounded_full().p(px(3.)).flex().flex_row().items_center().cursor_pointer()
-        .bg(if on { p.green } else { p.line2 })
+    div().id(id).w(px(40.)).h(px(22.)).flex_none().rounded_full().p(px(3.)).flex().flex_row().items_center()
+        .bg(if on { p.toggle } else { p.line2 })
         .when(on, |d| d.justify_end())
-        .child(div().size(px(18.)).rounded_full().bg(white()).shadow_sm())
+        .child(div().size(px(16.)).rounded_full().bg(white()).shadow_sm())
 }
 
 pub fn banner(p: &Pal, tone: Tone, icon_name: &str, title: &str, body: &str) -> Div {
     let (fg, bg) = p.tone(tone);
     div().flex().flex_row().flex_wrap().items_center().gap(px(12.)).pl(px(16.)).pr(px(14.)).py(px(12.))
-        .rounded(px(12.)).border_1().border_color(p.line).bg(p.surface)
+        .rounded(px(8.)).border_1().border_color(p.line).bg(p.surface)
         .child(div().size(px(30.)).flex_none().rounded(px(8.)).bg(bg).flex().items_center().justify_center().child(icon(icon_name, 16., fg)))
         .child(div().flex_1().min_w(px(240.)).flex().flex_col().gap(px(2.))
             .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title.to_string()))
@@ -260,7 +273,7 @@ pub fn code_block(p: &Pal, text: &str, max_lines: usize) -> Div {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     let pp = *p;
-    div().bg(p.code).border_1().border_color(p.line).rounded(px(10.)).px(px(14.)).py(px(12.)).font_family(MONO)
+    div().bg(p.code).border_1().border_color(p.line).rounded(px(6.)).px(px(14.)).py(px(12.)).font_family(MONO)
         .text_size(px(12.)).line_height(px(19.)).text_color(p.text2).overflow_hidden().flex().flex_col()
         .when(lines.is_empty(), |d| d.child(div().text_color(pp.text3).child("Nothing here yet.")))
         .children(lines[start..].iter().map(move |l| {
@@ -289,10 +302,10 @@ pub fn seg_with(id: &str, p: &Pal, options: &[(String, String)], current: &str, 
             let v = value.clone();
             let pick = on_pick.clone();
             div().id(SharedString::from(format!("{id}-{value}"))).h(px(28.)).px(px(12.)).rounded(px(7.)).flex().items_center()
-                .text_size(px(12.5)).font_weight(FontWeight::MEDIUM)
+                .text_size(px(13.)).font_weight(FontWeight::MEDIUM)
                 .text_color(if on { pp.text } else if off { pp.text3 } else { pp.text2 })
                 .when(on, |d| d.bg(pp.surface).shadow_sm())
-                .when(!off, |d| d.cursor_pointer().hover(move |s| s.text_color(pp.text)).on_click(move |_, _, cx| pick(v.clone(), cx)))
+                .when(!off, |d| d.hover(move |s| s.text_color(pp.text)).on_click(move |_, _, cx| pick(v.clone(), cx)))
                 .child(label.clone())
         }))
 }
@@ -305,7 +318,7 @@ pub fn tabs(id: &str, p: &Pal, options: &[(String, String)], current: &str, on_p
             let v = value.clone();
             let pick = on_pick.clone();
             div().id(SharedString::from(format!("{id}-{value}"))).h(px(38.)).px(px(12.)).flex().items_center()
-                .text_size(px(13.5)).font_weight(FontWeight::MEDIUM).cursor_pointer().border_b_2()
+                .text_size(px(13.5)).font_weight(FontWeight::MEDIUM).border_b_2()
                 .border_color(if on { pp.accent_hi } else { gpui_kit::transparent_black() })
                 .text_color(if on { pp.text } else { pp.text2 })
                 .hover(move |s| s.text_color(pp.text))
@@ -351,8 +364,45 @@ pub fn text_input(window: &mut Window, cx: &mut App, key: &str, value: &str, pla
 }
 
 pub fn input_el(state: &Entity<InputState>, mono_font: bool) -> Input {
-    let i = Input::new(state);
+    // Every text box is 32 px like the buttons and menus beside it, with one border (no outer ring).
+    let i = Input::new(state).h(px(32.)).focus_bordered(false);
     if mono_font { i.font_family(MONO) } else { i }
+}
+
+/// Placeholder rows while a list loads, as tall as the real rows, so nothing jumps when it arrives.
+pub fn skeleton_rows(p: &Pal, n: usize, row_h: f32) -> Div {
+    let (a, b, line) = (p.surface3, p.surface2, p.line);
+    div().flex().flex_col().children((0..n).map(move |i| div().h(px(row_h)).px(px(16.)).flex().flex_row().items_center().gap(px(12.))
+        .when(i > 0, |d| d.border_t_1().border_color(line))
+        .child(div().size(px(14.)).flex_none().rounded(px(4.)).bg(b))
+        .child(div().flex_1().flex().flex_col().gap(px(7.))
+            .child(div().h(px(9.)).w(relative(0.22 + 0.09 * (i % 3) as f32)).rounded(px(3.)).bg(a))
+            .child(div().h(px(7.)).w(relative(0.46 + 0.08 * (i % 4) as f32)).rounded(px(3.)).bg(b)))
+        .child(div().w(px(56.)).h(px(8.)).flex_none().rounded(px(3.)).bg(b))))
+}
+
+/// A date as people say it: Today, Yesterday, 3 days ago, 15 Nov, 15 Nov 2024. Takes "YYYY-MM-DD…".
+pub fn day_label(iso: &str) -> String {
+    fn days(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+    }
+    let parts: Vec<i64> = iso.get(..10).unwrap_or("").split('-').filter_map(|x| x.parse().ok()).collect();
+    if parts.len() != 3 { return iso.to_string(); }
+    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86400).unwrap_or(0);
+    let ago = today - days(parts[0], parts[1], parts[2]);
+    let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][((parts[1] - 1).clamp(0, 11)) as usize];
+    let this_year = 1970 + today * 400 / 146097;
+    match ago {
+        0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..=6 => format!("{ago} days ago"),
+        _ if parts[0] >= this_year => format!("{} {month}", parts[2]),
+        _ => format!("{} {month} {}", parts[2], parts[0]),
+    }
 }
 
 // ------------------------------------------------------------------ helpers
@@ -371,12 +421,21 @@ pub fn ago(secs: u64) -> String {
 }
 
 /// A card: one thing you control. Header (who, status, switch top-right), cost strip, quiet actions.
-pub fn cardbox(p: &Pal) -> Div { div().flex().flex_col().bg(p.card).border_1().border_color(p.cardline).rounded(px(16.)).overflow_hidden() }
+pub fn cardbox(p: &Pal) -> Div { div().flex().flex_col().bg(p.card).border_1().border_color(p.cardline).rounded(px(10.)).shadow(card_shadow(p)).overflow_hidden() }
+
+/// A card's elevation: a tight shadow under the edge and a soft one further out (light from above);
+/// dark cards also get a faint highlight along the top, since shadows barely show on dark grey.
+pub fn card_shadow(p: &Pal) -> Vec<BoxShadow> {
+    let s = |color: Hsla, y: f32, blur: f32, spread: f32, inset: bool| BoxShadow { color, offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread), inset };
+    let mut v = vec![s(p.shadow1, 1., 2., 0., false), s(p.shadow2, if p.dark { 8. } else { 4. }, if p.dark { 24. } else { 14. }, if p.dark { -4. } else { -2. }, false)];
+    if p.dark { v.push(s(p.highlight, 1., 0., 0., true)); }
+    v
+}
 
 /// A quiet text button for a card's footer.
 pub fn text_btn(id: impl Into<ElementId>, p: &Pal, label: &str) -> Stateful<Div> {
     let pp = *p;
-    div().id(id).px(px(10.)).py(px(6.)).rounded(px(8.)).text_size(px(14.)).text_color(p.text2).cursor_pointer()
+    div().id(id).px(px(10.)).py(px(6.)).rounded(px(8.)).text_size(px(14.)).text_color(p.text2)
         .hover(move |s| s.bg(pp.surface2).text_color(pp.text)).child(label.to_string())
 }
 

@@ -1,7 +1,7 @@
 //! Every screen, built from the parts in ui.rs, laid out as on the design canvas.
 
 use crate::ui::*;
-use crate::{api, clone_repo, draft, ensure_pecl, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, site_log_choice, tez, txt, Page, Tez};
+use crate::{api, clone_repo, draft, ensure_pecl, go, job, load_repos, local, notify, queue, refresh_now, send, set_local, set_setting, site_log_choice, tez, txt, Page, Tez};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -64,52 +64,103 @@ pub(crate) fn header(p: &Pal, title: &str, subtitle: &str, actions: Vec<AnyEleme
 pub(crate) fn empty_state(p: &Pal, icon_name: &str, title: &str, body: &str, actions: Vec<AnyElement>) -> Div {
     card(p).items_center().justify_center().py(px(48.)).px(px(32.)).gap(px(12.))
         .child(tile(p, Tone::Accent, 56., None, Some(icon_name)))
-        .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
+        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
         .child(div().max_w(px(380.)).text_color(p.text2).text_center().child(body.to_string()))
         .child(div().mt(px(6.)).flex().flex_row().flex_wrap().justify_center().gap(px(8.)).children(actions))
 }
 
 /// A dropdown that opens below its trigger and closes on any outside click.
+/// A dropdown. A long one (more than 10 choices) is a combo box: typing filters it, Enter picks the
+/// first match, Escape closes it. Every list is at most 300 px tall and scrolls.
 pub(crate) fn select(id: &str, p: &Pal, cx: &App, current: &str, options: Vec<(String, String)>, width: f32, on_pick: Pick) -> Div {
-    let open = tez(cx).open_select.as_deref() == Some(id);
+    let t = tez(cx);
+    let open = t.open_select.as_deref() == Some(id);
+    let searchable = options.len() > 10;
+    let focus = t.combo_focus.clone();
+    let typed = if open { t.combo_q.clone() } else { String::new() };
+    let query = typed.to_lowercase();
     let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| l.clone()).unwrap_or_else(|| current.to_string());
     let pp = *p;
     let idc = id.to_string();
-    let trigger = div().id(sid(format!("sel-{id}"))).w(px(width)).h(px(34.)).px(px(10.)).rounded(px(8.)).border_1()
+    let f_open = focus.clone();
+    let trigger = div().id(sid(format!("sel-{id}"))).w(px(width)).h(px(32.)).px(px(10.)).rounded(px(6.)).border_1()
         .border_color(if open { p.accent_hi } else { p.line2 }).bg(p.bg).flex().flex_row().items_center().justify_between().gap(px(8.))
-        .cursor_pointer().text_size(px(13.)).text_color(p.text)
+        .text_size(px(13.)).text_color(p.text)
         .child(div().flex_1().truncate().child(label))
         .child(icon("chevron-down", 14., p.text3))
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             let t = cx.global_mut::<Tez>();
             let just_closed = t.select_closed.as_ref().map(|(i, at)| *i == idc && at.elapsed() < Duration::from_millis(300)).unwrap_or(false);
-            t.open_select = if t.open_select.as_deref() == Some(idc.as_str()) || just_closed { None } else { Some(idc.clone()) };
+            let opening = !(t.open_select.as_deref() == Some(idc.as_str()) || just_closed);
+            t.open_select = if opening { Some(idc.clone()) } else { None };
+            t.combo_q.clear();
+            if opening && searchable { if let Some(h) = &f_open { window.focus(h, cx); } }
             cx.refresh_windows();
         });
     let mut d = div().flex().flex_col().child(trigger);
     if open {
         let idm = id.to_string();
-        let menu = div().occlude().w(px(width.max(200.))).mt(px(4.)).p(px(4.)).rounded(px(10.)).bg(p.surface2).border_1().border_color(p.line2)
-            .shadow_lg().flex().flex_col()
+        let total = options.len();
+        let shown: Vec<(String, String)> = options.into_iter().filter(|(v, l)| query.is_empty() || l.to_lowercase().contains(&query) || v.to_lowercase().contains(&query)).collect();
+        let first = shown.first().map(|(v, _)| v.clone());
+        let pick_first = on_pick.clone();
+        let mut menu = div().occlude().w(px(width.max(220.))).mt(px(4.)).p(px(4.)).rounded(px(8.)).bg(p.surface2).border_1().border_color(p.line2)
+            .shadow_lg().flex().flex_col().gap(px(2.))
             .on_mouse_down_out(move |_, _, cx| {
                 let t = cx.global_mut::<Tez>();
                 if t.open_select.as_deref() == Some(idm.as_str()) { t.open_select = None; t.select_closed = Some((idm.clone(), Instant::now())); }
                 cx.refresh_windows();
-            })
-            .children(options.into_iter().map(|(v, l)| {
-                let on = v == current;
-                let pick = on_pick.clone();
-                let vv = v.clone();
-                div().id(sid(format!("opt-{id}-{v}"))).flex().flex_row().items_center().gap(px(8.)).h(px(32.)).px(px(10.)).rounded(px(7.))
-                    .text_size(px(13.)).cursor_pointer().text_color(pp.text).hover(move |s| s.bg(pp.surface3))
-                    .child(div().flex_1().child(l))
-                    .when(on, |d| d.child(icon("check", 14., pp.accent_text)))
-                    .on_click(move |_, _, cx| {
-                        cx.global_mut::<Tez>().open_select = None;
-                        pick(vv.clone(), cx);
-                        cx.refresh_windows();
-                    })
-            }));
+            });
+        if searchable {
+            if let Some(h) = &focus { menu = menu.track_focus(h); }
+            menu = menu
+                .on_key_down(move |ev, _, cx| {
+                    let k = &ev.keystroke;
+                    let mut chosen: Option<String> = None;
+                    {
+                        let t = cx.global_mut::<Tez>();
+                        match k.key.as_str() {
+                            "escape" => t.open_select = None,
+                            "backspace" => { t.combo_q.pop(); }
+                            "enter" => { t.open_select = None; chosen = first.clone(); }
+                            _ => {
+                                if let Some(c) = k.key_char.as_ref() {
+                                    if !c.chars().any(|ch| ch.is_control()) && !k.modifiers.control && !k.modifiers.platform { t.combo_q.push_str(c); }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(v) = chosen { pick_first(v, cx); }
+                    cx.refresh_windows();
+                })
+                .child(div().h(px(30.)).px(px(8.)).mb(px(2.)).rounded(px(6.)).bg(pp.bg).border_1().border_color(pp.line2).flex().flex_row().items_center().gap(px(8.))
+                    .child(icon("search", 13., pp.text3))
+                    .child(if typed.is_empty() { div().text_size(px(13.)).text_color(pp.text3).child(format!("Type to filter {total}")) }
+                        else { div().text_size(px(13.)).text_color(pp.text).child(typed.clone()) })
+                    .child(div().w(px(1.)).h(px(14.)).bg(pp.text2)));
+        }
+        let rows: Vec<AnyElement> = shown.into_iter().map(|(v, l)| {
+            let on = v == current;
+            let pick = on_pick.clone();
+            let vv = v.clone();
+            div().id(sid(format!("opt-{id}-{v}"))).flex().flex_row().flex_none().items_center().gap(px(8.)).h(px(30.)).px(px(8.)).rounded(px(5.))
+                .text_size(px(13.)).text_color(pp.text).hover(move |s| s.bg(pp.surface3))
+                .child(div().flex_1().truncate().child(l))
+                .when(on, |d| d.child(icon("check", 14., pp.accent_text)))
+                .on_click(move |_, _, cx| {
+                    {
+                        let t = cx.global_mut::<Tez>();
+                        t.open_select = None;
+                        t.combo_q.clear();
+                    }
+                    pick(vv.clone(), cx);
+                    cx.refresh_windows();
+                })
+                .into_any_element()
+        }).collect();
+        let empty = rows.is_empty();
+        menu = menu.child(div().id(sid(format!("sel-list-{id}"))).max_h(px(300.)).overflow_y_scroll().flex().flex_col().children(rows)
+            .when(empty, |d| d.child(div().px(px(8.)).py(px(8.)).text_size(px(13.)).text_color(pp.text3).child("No matches"))));
         d = d.child(deferred(anchored().snap_to_window().child(menu)).with_priority(1));
     }
     d
@@ -156,12 +207,12 @@ pub(crate) fn jump_overlay(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEle
     let pp = *p;
     div().absolute().top_0().left_0().size_full().bg(rgba(0x00000080)).flex().flex_col().items_center().pt(px(110.))
         .occlude()
-        .child(div().id("jump-card").occlude().w(px(540.)).bg(p.surface).border_1().border_color(p.line2).rounded(px(14.)).shadow_lg().flex().flex_col()
+        .child(div().id("jump-card").occlude().w(px(540.)).bg(p.surface).border_1().border_color(p.line2).rounded(px(10.)).shadow_lg().flex().flex_col()
             .on_mouse_down_out(|_, _, cx| { cx.global_mut::<Tez>().jump = false; cx.refresh_windows(); })
             .child(div().p(px(12.)).border_b_1().border_color(p.line).child(input_el(&input, false)))
             .child(div().p(px(6.)).flex().flex_col().children(items.into_iter().enumerate().map(move |(i, (label, ic, page))| {
                 div().id(sid(format!("jump-{i}"))).flex().flex_row().items_center().gap(px(10.)).h(px(36.)).px(px(10.)).rounded(px(8.))
-                    .cursor_pointer().hover(move |s| s.bg(pp.surface2))
+                    .hover(move |s| s.bg(pp.surface2))
                     .child(icon(&ic, 15., pp.text3)).child(label)
                     .on_click(move |_, _, cx| { set_local(cx, "jumpq", String::new()); go(cx, page.clone()); })
             }))))
@@ -198,7 +249,7 @@ pub(crate) fn site_row(p: &Pal, s: &Value, procs: &[Value]) -> AnyElement {
     let target = Page::Site(name.clone());
     let (u1, path1, n1, n2) = (url.clone(), path.clone(), name.clone(), name.clone());
     div().flex().flex_row().items_center().gap(px(16.)).px(px(18.)).py(px(13.))
-        .child(div().id(sid(format!("row-{name}"))).w(px(250.)).flex_none().flex().flex_row().items_center().gap(px(12.)).cursor_pointer()
+        .child(div().id(sid(format!("row-{name}"))).w(px(250.)).flex_none().flex().flex_row().items_center().gap(px(12.))
             .child(tile(p, site_tone(&name), 34., Some(&name[..1]), None))
             .child(div().min_w(px(0.)).flex().flex_col()
                 .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(name.clone()))
@@ -340,7 +391,7 @@ pub(crate) fn site_env(p: &Pal, name: &str, d: &Value, window: &mut Window, cx: 
         let open = !q.is_empty() || (default_open != tez(cx).toggled.contains(&tkey));
         let secrets = keys.iter().filter(|k| k["secret"].as_bool() == Some(true)).count();
         let tk = tkey.clone();
-        let head = div().id(sid(format!("envg-{gi}"))).flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(14.)).cursor_pointer()
+        let head = div().id(sid(format!("envg-{gi}"))).flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(14.))
             .when(open, |d| d.border_b_1().border_color(p.line))
             .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14., p.text3))
             .child(h2(p, title.clone()))
@@ -512,10 +563,13 @@ pub(crate) fn new_site(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
 pub(crate) fn new_from_github(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement {
     let t = tez(cx);
     let accounts = arr(&t.identities["accounts"]);
-    let owners: Vec<String> = arr(&t.github["owners"]).iter().map(txt).collect();
     let account = t.gh_account.clone();
-    let owner = t.gh_owner.clone();
+    // The account itself is always an owner, so the menu is never empty while its organisations load.
+    let mut owners: Vec<String> = arr(&t.github["owners"]).iter().map(txt).collect();
+    if !account.is_empty() && !owners.contains(&account) { owners.insert(0, account.clone()); }
+    let owner = if t.gh_owner.is_empty() { account.clone() } else { t.gh_owner.clone() };
     let loading = t.gh_loading;
+    let repos_null = t.repos.is_null();
     let repos = arr(&t.repos["repos"]);
     let route = t.gh_route.clone();
     let ssh_hosts = arr(&t.identities["ssh_hosts"]);
@@ -529,10 +583,10 @@ pub(crate) fn new_from_github(p: &Pal, window: &mut Window, cx: &mut App) -> Any
         let login = txt(&a["login"]);
         let on = login == account;
         let l2 = login.clone();
-        div().id(sid(format!("acct-{login}"))).flex().flex_row().items_center().gap(px(8.)).h(px(38.)).px(px(12.)).rounded(px(8.)).border_1().cursor_pointer()
+        div().id(sid(format!("acct-{login}"))).flex().flex_row().items_center().gap(px(8.)).h(px(32.)).px(px(10.)).rounded(px(6.)).border_1()
             .border_color(if on { pp.accent_hi } else { pp.line2 }).bg(if on { pp.accent_soft } else { pp.surface })
             .child(div().size(px(22.)).rounded_full().bg(if on { pp.accent } else { pp.surface3 }).flex().items_center().justify_center()
-                .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(if on { white() } else { pp.text2 }).child(login[..1].to_uppercase()))
+                .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(if on { pp.bg } else { pp.text2 }).child(login[..1].to_uppercase()))
             .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(login.clone()))
             .when(on, |d| d.child(icon("check", 14., pp.accent_text)))
             .on_click(move |_, _, cx| {
@@ -555,10 +609,10 @@ pub(crate) fn new_from_github(p: &Pal, window: &mut Window, cx: &mut App) -> Any
         let lang = txt(&r["primaryLanguage"]["name"]);
         let desc = txt(&r["description"]);
         let private = r["isPrivate"].as_bool() == Some(true);
-        let updated = txt(&r["updatedAt"]).chars().take(10).collect::<String>();
+        let updated = day_label(&txt(&r["updatedAt"]));
         let f2 = full.clone();
         let short = txt(&r["name"]);
-        div().id(sid(format!("repo-{full}"))).flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(11.)).cursor_pointer()
+        div().id(sid(format!("repo-{full}"))).flex().flex_row().items_center().gap(px(12.)).px(px(16.)).h(px(52.))
             .when(on, |d| d.bg(pp.accent_soft)).hover(move |s| s.bg(pp.surface2))
             .child(icon(if on { "circle-check" } else { "git-branch" }, 15., if on { pp.accent_text } else { pp.text3 }))
             .child(div().flex_1().min_w(px(0.)).flex().flex_col()
@@ -570,19 +624,19 @@ pub(crate) fn new_from_github(p: &Pal, window: &mut Window, cx: &mut App) -> Any
             .into_any_element()
     }).collect();
 
-    let left = card(p).flex_grow(1.).flex_basis(px(460.)).min_w(px(420.))
+    let left = card(p).flex_grow(1.).flex_basis(px(420.)).min_w(px(360.))
         .child(div().p(px(18.)).flex().flex_col().gap(px(14.)).border_b_1().border_color(p.line)
             .child(div().flex().flex_col().gap(px(8.)).child(muted(p, "Account, from the GitHub CLI"))
                 .child(div().flex().flex_row().flex_wrap().gap(px(8.)).children(acct_btns)
-                    .child(button("acct-more", p, Kind::Ghost, false, Some("plus"), Some("Sign in another")).h(px(38.)).on_click(|_, _, cx| go(cx, Page::Settings)))))
+                    .child(button("acct-more", p, Kind::Ghost, false, Some("plus"), Some("Sign in another")).on_click(|_, _, cx| go(cx, Page::Settings)))))
             .child(div().flex().flex_row().gap(px(8.)).child(owner_sel).child(div().flex_1().child(input_el(&search, false)))))
-        .child(if loading { div().p(px(18.)).child(muted(p, "Loading repositories…")).into_any_element() }
+        .child(if loading || (repos_null && !accounts.is_empty()) { skeleton_rows(p, 7, 52.).into_any_element() }
             else if accounts.is_empty() { div().p(px(18.)).child(muted(p, "No GitHub account is signed in. Sign in under Settings, or run gh auth login.")).into_any_element() }
             else if repo_rows.is_empty() { div().p(px(18.)).flex().flex_col().gap(px(10.)).child(muted(p, "No repositories found.")).child(div().child(button("repos-reload", p, Kind::Secondary, true, Some("refresh-cw"), Some("Reload")).on_click(|_, _, cx| load_repos(cx)))).into_any_element() }
             else { div().id("repo-list").max_h(px(520.)).overflow_y_scroll().child(rows(p, repo_rows)).into_any_element() });
 
     let right: AnyElement = if selected.is_empty() {
-        card(p).flex_grow(1.).flex_basis(px(340.)).min_w(px(320.)).p(px(24.)).gap(px(8.)).items_center().justify_center()
+        card(p).flex_grow(1.).flex_basis(px(300.)).min_w(px(280.)).p(px(24.)).gap(px(8.)).items_center().justify_center()
             .child(icon("github", 28., p.text3)).child(strong(p, "Pick a repository")).child(muted(p, "Its clone settings appear here.")).into_any_element()
     } else {
         let short = selected.rsplit('/').next().unwrap_or_default().to_string();
@@ -597,7 +651,7 @@ pub(crate) fn new_from_github(p: &Pal, window: &mut Window, cx: &mut App) -> Any
         let key_file = ssh_hosts.iter().find(|h| route == format!("ssh:{}", txt(&h["alias"]))).map(|h| txt(&h["identity"])).unwrap_or_default();
         let route_sel = select("route", p, cx, &route, route_opts, 300., route_pick);
         let (repo, fold) = (selected.clone(), folder.clone());
-        card(p).flex_grow(1.).flex_basis(px(340.)).min_w(px(320.))
+        card(p).flex_grow(1.).flex_basis(px(300.)).min_w(px(280.))
             .child(card_head(p, &format!("Clone {selected}")))
             .child(div().p(px(18.)).flex().flex_col().gap(px(16.))
                 .child(div().flex().flex_col().gap(px(6.)).child(muted(p, "Route")).child(route_sel)
@@ -640,7 +694,7 @@ pub(crate) fn services_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyEl
         let state = procs.iter().find(|x| txt(&x["name"]) == name).map(|x| txt(&x["state"])).unwrap_or_else(|| "stopped".into());
         let port = s["port"].as_u64().map(|x| format!(":{x}")).unwrap_or_default();
         let n2 = name.clone();
-        div().id(sid(format!("svc-{name}"))).flex().flex_row().items_center().gap(px(10.)).px(px(10.)).py(px(9.)).rounded(px(8.)).cursor_pointer()
+        div().id(sid(format!("svc-{name}"))).flex().flex_row().items_center().gap(px(10.)).px(px(10.)).py(px(9.)).rounded(px(8.))
             .when(active, |d| d.bg(pp.surface2)).hover(move |s| s.bg(pp.surface2))
             .child(if is_installed { dot(if state == "running" { pp.green } else { pp.text3 }).into_any_element() } else { icon("plus", 13., pp.text3).into_any_element() })
             .child(div().flex_1().min_w(px(0.)).flex().flex_col()
@@ -674,7 +728,7 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
         let k = kind.clone();
         return card(p).p(px(24.)).gap(px(14.))
             .child(div().flex().flex_row().items_center().gap(px(14.)).child(tile(p, service_tone(&kind), 44., None, Some(service_icon(&kind))))
-                .child(div().flex().flex_col().child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title.clone())).child(muted(p, about))))
+                .child(div().flex().flex_col().child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(title.clone())).child(muted(p, about))))
             .child(if !reason.is_empty() { muted(p, reason).into_any_element() } else {
                 let cat = service_versions(cx, &kind);
                 let opts: Vec<(String, String)> = if cat.is_empty() { list.iter().filter(|v| !v.is_empty()).map(|v| (v.clone(), v.clone())).collect() } else { cat };
@@ -700,7 +754,7 @@ pub(crate) fn service_detail(p: &Pal, s: &Value, procs: &[Value], window: &mut W
             .child(tile(p, service_tone(&kind), 44., None, Some(service_icon(&kind))))
             .child(div().flex_1().min_w(px(240.)).flex().flex_col().gap(px(2.))
                 .child(div().flex().flex_row().items_center().gap(px(10.))
-                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(format!("{title} {full}")))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(format!("{title} {full}")))
                     .child(pill(p, state_tone(&state), state_label(&state), true)))
                 .child(muted(p, if stats.is_empty() { about.clone() } else { format!("{} · {about}", stats.join(" · ")) })))
             .when(!url.is_empty(), |d| { let u = url.clone(); d.child(button("svc-open", p, Kind::Secondary, false, Some("external-link"), Some("Open")).on_click(move |_, _, _| api::open_url(&u))) })
@@ -819,9 +873,9 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
         let users = arr(&v["sites"]).len();
         let m2 = minor.clone();
         let preview = minor.as_str() >= "8.6";
-        card(&pp).id(sid(format!("phpv-{minor}"))).w(px(124.)).flex_none().p(px(12.)).gap(px(2.)).cursor_pointer()
+        card(&pp).id(sid(format!("phpv-{minor}"))).w(px(124.)).flex_none().p(px(12.)).gap(px(2.))
             .when(on, |d| d.border_color(pp.accent_hi).bg(pp.accent_soft))
-            .child(div().flex().flex_row().items_center().child(div().flex_1().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(minor.clone()))
+            .child(div().flex().flex_row().items_center().child(div().flex_1().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(minor.clone()))
                 .when(v["default"] == true, |d| d.child(pill(&pp, Tone::Accent, "Default", false)))
                 .when(v["default"] != true && preview, |d| d.child(pill(&pp, Tone::Warn, "Preview", false))))
             .child(div().font_family(MONO).text_size(px(12.)).text_color(pp.text3).child(txt(&v["version"])))
@@ -832,8 +886,8 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
     for m in available.iter().filter(|m| !installed.contains(m)) {
         let m2 = m.clone();
         grid.push(div().id(sid(format!("phpadd-{m}"))).w(px(124.)).flex_none().p(px(12.)).rounded(px(12.)).border_1().border_dashed().border_color(p.line2)
-            .flex().flex_col().gap(px(2.)).cursor_pointer().hover(move |s| s.border_color(pp.accent_hi))
-            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(m.clone()))
+            .flex().flex_col().gap(px(2.)).hover(move |s| s.border_color(pp.accent_hi))
+            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(p.text2).child(m.clone()))
             .child(div().flex().flex_row().items_center().gap(px(4.)).child(icon("download", 12., p.text3)).child(muted(p, "Install")))
             .on_click(move |_, _, cx| job(cx, &["php", "install", &m2], &format!("Install PHP {m2}"), "Installing PHP"))
             .into_any_element());
@@ -867,11 +921,11 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
     let ini_path = home.join("php").join(&minor).join("php.ini").to_string_lossy().to_string();
     let head = card(p).flex_row().flex_wrap().items_center().gap(px(14.)).px(px(18.)).py(px(16.))
         .child(div().flex_1().min_w(px(280.)).flex().flex_col().gap(px(2.))
-            .child(div().flex().flex_row().items_center().gap(px(10.)).child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(format!("PHP {}", txt(&v["version"]))))
+            .child(div().flex().flex_row().items_center().gap(px(10.)).child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(format!("PHP {}", txt(&v["version"]))))
                 .when(is_default, |d| d.child(pill(p, Tone::Accent, "Default", false))))
             .child(muted(p, if users.is_empty() { "No site uses it yet".to_string() } else { format!("Used by {}", users.join(", ")) })))
         .when(!is_default, |d| d.child(button("php-default", p, Kind::Secondary, false, None, Some("Make default"))
-            .on_click(move |_, _, cx| send(cx, "/api/settings".into(), json!({ "default_php": m_def.clone() }), "Default PHP changed"))))
+            .on_click(move |_, _, cx| set_setting(cx, "default_php", json!(m_def.clone()), "Default PHP changed"))))
         .child(button("php-ini", p, Kind::Secondary, false, Some("file-code"), Some("Open php.ini")).on_click(move |_, _, _| api::open_editor(&ini_path)))
         .child(button("php-restart", p, Kind::Secondary, false, None, Some("Restart workers")).on_click(move |_, _, cx| send(cx, format!("/api/proc/php-{m_rs}/restart"), json!({}), "Restarting PHP")));
 
@@ -899,7 +953,7 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
     let (m_o, m_d) = (minor.clone(), minor.clone());
     let speed: Vec<AnyElement> = vec![
         field(p, "Xdebug", Some(if pecl_ok { "Off by default, because it slows every request".into() } else { "Not in the static PHP builds on this system".into() }), false,
-            switch("php-xdebug", p, xdebug_on).on_click(move |_, _, cx| send(cx, "/api/settings".into(), json!({ "xdebug": !xdebug_on }), "Saved; PHP restarted"))).into_any_element(),
+            switch("php-xdebug", p, xdebug_on).on_click(move |_, _, cx| set_setting(cx, "xdebug", json!(!xdebug_on), "Saved; PHP restarted"))).into_any_element(),
         field(p, "OPcache for web and CLI", Some("Why artisan runs in under a second".into()), false,
             switch("php-opcache", p, opc_on).on_click(move |_, _, cx| send(cx, format!("/api/php/{m_o}"), json!({ "settings": { "opcache.enable": if opc_on { "0" } else { "1" }, "opcache.enable_cli": if opc_on { "0" } else { "1" } } }), "Saved; PHP restarted"))).into_any_element(),
         field(p, "Show errors in the browser", Some("display_errors".into()), false,
@@ -965,7 +1019,7 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
         let tk = format!("php:{minor}:{title}");
         let open = tez(cx).toggled.contains(&tk);
         let tk2 = tk.clone();
-        let mut c = card(p).child(div().id(sid(format!("phpg-{title}"))).flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(14.)).cursor_pointer()
+        let mut c = card(p).child(div().id(sid(format!("phpg-{title}"))).flex().flex_row().items_center().gap(px(12.)).px(px(18.)).py(px(14.))
             .when(open, |d| d.border_b_1().border_color(pp.line))
             .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14., pp.text3))
             .child(h2(p, title.to_string()))
@@ -987,8 +1041,8 @@ pub(crate) fn php_page(p: &Pal, window: &mut Window, cx: &mut App) -> AnyElement
         .when(grid.len() > versions.len(), |d| d.child(div().flex().flex_col().gap(px(10.)).child(muted(p, "Not installed yet")).child(div().flex().flex_row().flex_wrap().gap(px(8.)).children(grid.into_iter().skip(versions.len())))))
         .child(head)
         .child(div().flex().flex_row().flex_wrap().items_start().gap(px(16.))
-            .child(card(p).flex_grow(1.).flex_basis(px(360.)).min_w(px(340.)).child(card_head(p, "Essentials").child(muted(p, "Changed most often"))).child(rows(p, ess)))
-            .child(card(p).flex_grow(1.).flex_basis(px(360.)).min_w(px(340.)).child(card_head(p, "Debugging and speed")).child(rows(p, speed))))
+            .child(card(p).flex_grow(1.).flex_basis(px(520.)).min_w(px(500.)).child(card_head(p, "Essentials").child(muted(p, "Changed most often"))).child(rows(p, ess)))
+            .child(card(p).flex_grow(1.).flex_basis(px(520.)).min_w(px(500.)).child(card_head(p, "Debugging and speed")).child(rows(p, speed))))
         .child(ext_card)
         .child(groups)
         .into_any_element()
@@ -1071,7 +1125,7 @@ pub(crate) fn mail_page(p: &Pal, cx: &App) -> AnyElement {
         let unread = m["Read"] == false;
         let when = txt(&m["Created"]).replace('T', " ").chars().take(16).collect::<String>();
         let link = format!("{url}/view/{id}");
-        div().id(sid(format!("mail-{id}"))).flex().flex_row().items_start().gap(px(12.)).px(px(18.)).py(px(12.)).cursor_pointer().hover(move |s| s.bg(pp.surface2))
+        div().id(sid(format!("mail-{id}"))).flex().flex_row().items_start().gap(px(12.)).px(px(18.)).py(px(12.)).hover(move |s| s.bg(pp.surface2))
             .child(div().pt(px(6.)).child(dot(if unread { pp.accent_hi } else { gpui_kit::transparent_black() })))
             .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap(px(2.))
                 .child(div().flex().flex_row().gap(px(8.)).child(div().font_weight(if unread { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM }).child(txt(&m["Subject"])))
@@ -1117,7 +1171,7 @@ pub(crate) fn logs_page(p: &Pal, cx: &App) -> AnyElement {
             let on = name == sel;
             let st = txt(&x["state"]);
             let n2 = name.clone();
-            nav = nav.child(div().id(sid(format!("lg-{name}"))).flex().flex_row().items_center().gap(px(10.)).h(px(30.)).px(px(10.)).rounded(px(8.)).cursor_pointer()
+            nav = nav.child(div().id(sid(format!("lg-{name}"))).flex().flex_row().items_center().gap(px(10.)).h(px(30.)).px(px(10.)).rounded(px(8.))
                 .when(on, |d| d.bg(pp.surface2)).hover(move |s| s.bg(pp.surface2))
                 .child(dot(if st == "running" { pp.green } else if st == "failed" { pp.red } else { pp.text3 }))
                 .child(div().flex_1().truncate().font_family(MONO).text_size(px(12.)).text_color(if on { pp.text } else { pp.text2 }).child(name.clone()))
