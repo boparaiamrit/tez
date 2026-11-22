@@ -136,6 +136,7 @@ unsafe extern "system" {
     fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
     fn GetStdHandle(which: u32) -> HANDLE;
     fn SetHandleInformation(h: HANDLE, mask: u32, flags: u32) -> i32;
+    fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
 }
 
 /// Bytes free for this user on the volume holding `path`.
@@ -418,3 +419,15 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 pub fn on_shutdown_signal(_f: fn()) {}
 pub fn remember_groups(_procs: &[u32]) {}
 pub fn kill_stale_groups() {}
+
+/// Whole-machine CPU counters as (idle, total) in 100 ns units; the caller takes deltas.
+pub fn system_cpu_times() -> Option<(u64, u64)> {
+    let (mut idle, mut kernel, mut user) = (0u64, 0u64, 0u64);
+    // SAFETY: three valid out pointers to FILETIME-sized integers.
+    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+    // Kernel time already includes idle time.
+    if ok == 0 { None } else { Some((idle, kernel + user)) }
+}
+
+/// Only used where `system_cpu_times` is unavailable (macOS).
+pub fn system_cpu_percent() -> Option<f64> { None }

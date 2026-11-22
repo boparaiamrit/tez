@@ -261,3 +261,26 @@ pub fn kill_stale_groups() {
     }
     let _ = std::fs::remove_file(groups_file());
 }
+
+/// Whole-machine CPU counters as (idle, total) in clock ticks (Linux); the caller takes deltas.
+pub fn system_cpu_times() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/stat").ok()?;
+        let v: Vec<u64> = text.lines().next()?.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+        if v.len() < 4 { return None; }
+        let idle = v[3] + v.get(4).copied().unwrap_or(0);
+        return Some((idle, v.iter().take(8).sum()));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// macOS: whole-machine CPU percent from one `ps` call (all processes' %cpu over the cores).
+pub fn system_cpu_percent() -> Option<f64> {
+    if !cfg!(target_os = "macos") { return None; }
+    let out = std::process::Command::new("ps").args(["-A", "-o", "%cpu="]).output().ok()?;
+    let sum: f64 = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse::<f64>().ok()).sum();
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+    Some((sum / n).clamp(0.0, 100.0))
+}

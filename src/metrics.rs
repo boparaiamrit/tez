@@ -20,7 +20,8 @@ const SPARK_POINTS: usize = 60;
 const BUCKETS: u64 = 180;
 
 #[derive(Clone, Copy, Default)]
-struct Sample { t: u64, php: u64, sites: u64, services: u64, web: u64, cpu: f64 }
+/// One sample: tez memory per group and tez CPU, plus the whole machine's CPU and used RAM.
+struct Sample { t: u64, php: u64, sites: u64, services: u64, web: u64, cpu: f64, sys_cpu: f64, mem_used: u64 }
 
 #[derive(Default)]
 struct ProcHist { last: Option<(Instant, u64)>, cpu: f64, memory: u64, spark: VecDeque<u64> }
@@ -37,6 +38,8 @@ struct Store {
     wsl_at: Option<Instant>,
     disk_at: Option<Instant>,
     cache_at: Option<Instant>,
+    cpu_last: Option<(u64, u64)>,
+    sys_cpu: f64,
 }
 
 static STORE: LazyLock<Mutex<Store>> = LazyLock::new(|| Mutex::new(Store::default()));
@@ -76,16 +79,26 @@ fn sample(shared: &Shared) {
     let wsl = if wsl_due { Some(sys::wsl_memory()) } else { None };
     let disk = if disk_due { Some(sys::disk_space(&paths::home())) } else { None };
     let cache = if cache_due { Some(cache_size(&paths::cache_dir())) } else { None };
+    let cpu_times = sys::system_cpu_times();
+    let cpu_pct = if cpu_times.is_none() { sys::system_cpu_percent() } else { None };
 
     let mut s = STORE.lock().unwrap();
     if let Some((total, available)) = mem { s.machine.total = total; s.machine.available = available; s.mem_at = Some(at); }
     if let Some(w) = wsl { s.machine.wsl = w; s.wsl_at = Some(at); }
     if let Some((free, total)) = disk { s.machine.disk_free = free; s.machine.disk_total = total; s.disk_at = Some(at); }
     if let Some(c) = cache { s.machine.cache = c; s.cache_at = Some(at); }
+    if let Some((idle, total)) = cpu_times {
+        if let Some((i0, t0)) = s.cpu_last {
+            let (di, dt) = (idle.saturating_sub(i0) as f64, total.saturating_sub(t0) as f64);
+            if dt > 0.0 { s.sys_cpu = ((1.0 - di / dt) * 100.0).clamp(0.0, 100.0); }
+        }
+        s.cpu_last = Some((idle, total));
+    }
+    if let Some(p) = cpu_pct { s.sys_cpu = p; }
 
     let names: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
     s.procs.retain(|k, _| names.contains(k));
-    let mut sm = Sample { t: now(), ..Default::default() };
+    let mut sm = Sample { t: now(), sys_cpu: s.sys_cpu, mem_used: s.machine.total.saturating_sub(s.machine.available), ..Default::default() };
     for (name, group, memory, cpu_time) in rows {
         let h = s.procs.entry(name).or_default();
         let cpu = match (cpu_time, h.last) {
@@ -128,31 +141,30 @@ pub fn json(range: &str) -> Value {
     let now = now();
     let start = now.saturating_sub(secs);
     let width = (secs / BUCKETS).max(EVERY);
-    let mut series: Vec<Value> = Vec::new();
-    let mut acc: Option<(u64, u64, u64, u64, u64, u64, u64, f64, u64)> = None; // idx, t, php, sites, services, web, n, cpu, -
-    let flush = |a: (u64, u64, u64, u64, u64, u64, u64, f64, u64), out: &mut Vec<Value>| {
-        let n = a.6.max(1);
-        out.push(json!({ "t": a.1 / n, "php": a.2 / n, "sites": a.3 / n, "services": a.4 / n, "web": a.5 / n, "cpu": round1(a.7 / n as f64) }));
+    #[derive(Default)]
+    struct Acc { idx: u64, n: u64, t: u64, php: u64, sites: u64, services: u64, web: u64, cpu: f64, sys_cpu: f64, mem_used: u64 }
+    let flush = |a: &Acc, out: &mut Vec<Value>| {
+        let n = a.n.max(1);
+        out.push(json!({ "t": a.t / n, "php": a.php / n, "sites": a.sites / n, "services": a.services / n, "web": a.web / n,
+            "cpu": round1(a.cpu / n as f64), "sys_cpu": round1(a.sys_cpu / n as f64), "mem_used": a.mem_used / n }));
     };
+    let mut series: Vec<Value> = Vec::new();
+    let mut acc: Option<Acc> = None;
     for x in s.samples.iter().filter(|x| x.t >= start) {
         let idx = (x.t - start) / width;
-        match acc.as_mut() {
-            Some(a) if a.0 == idx => { a.1 += x.t; a.2 += x.php; a.3 += x.sites; a.4 += x.services; a.5 += x.web; a.6 += 1; a.7 += x.cpu; }
-            _ => {
-                if let Some(a) = acc.take() { flush(a, &mut series); }
-                acc = Some((idx, x.t, x.php, x.sites, x.services, x.web, 1, x.cpu, 0));
-            }
-        }
+        if acc.as_ref().map(|a| a.idx != idx).unwrap_or(false) { flush(acc.as_ref().unwrap(), &mut series); acc = None; }
+        let a = acc.get_or_insert_with(|| Acc { idx, ..Default::default() });
+        a.n += 1; a.t += x.t; a.php += x.php; a.sites += x.sites; a.services += x.services; a.web += x.web;
+        a.cpu += x.cpu; a.sys_cpu += x.sys_cpu; a.mem_used += x.mem_used;
     }
-    if let Some(a) = acc.take() { flush(a, &mut series); }
-    let mut procs = serde_json::Map::new();
+    if let Some(a) = acc.as_ref() { flush(a, &mut series); }    let mut procs = serde_json::Map::new();
     for (name, h) in &s.procs {
         procs.insert(name.clone(), json!({ "cpu": round1(h.cpu), "memory": h.memory, "spark": downsample(&h.spark, SPARK_POINTS) }));
     }
     let m = &s.machine;
     json!({
         "now": now, "range": label,
-        "machine": { "total": m.total, "available": m.available, "wsl": m.wsl, "disk_free": m.disk_free, "disk_total": m.disk_total, "cache": m.cache, "cpus": cpus() },
+        "machine": { "total": m.total, "available": m.available, "used": m.total.saturating_sub(m.available), "cpu": round1(s.sys_cpu), "wsl": m.wsl, "disk_free": m.disk_free, "disk_total": m.disk_total, "cache": m.cache, "cpus": cpus() },
         "series": series,
         "procs": procs,
     })

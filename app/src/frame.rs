@@ -432,9 +432,9 @@ fn stacked_chart(p: &Pal, rows: Vec<[f64; 4]>, scale: f64, ticks: Vec<f64>, hove
     }).size_full()
 }
 /// Lines (response time p50 and p95), values in ms.
-fn line_chart(p: &Pal, lines: Vec<(Vec<f64>, Hsla)>) -> impl IntoElement {
+fn line_chart(p: &Pal, lines: Vec<(Vec<f64>, Hsla)>, max: f64) -> impl IntoElement {
     let pp = *p;
-    let max = lines.iter().flat_map(|(v, _)| v.iter().copied()).fold(0., f64::max).max(1.) * 1.2;
+    let max = max.max(1.);
     canvas(move |b, _, _| b, move |b, _, window, _| {
         let (x0, y0, w, h) = (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
         window.paint_quad(fill(Bounds::new(point(px(x0), px(y0 + h * 0.5)), size(px(w), px(1.))), pp.line));
@@ -551,93 +551,85 @@ fn home(p: &Pal, cx: &App) -> AnyElement {
         out = out.child(cardbox(p).border_color(pp.amber.opacity(0.35)).children(att));
     }
 
-    // Memory over time.
+    // This computer: CPU and RAM over time for the whole machine, with tez's share inside.
     let series = arr(&m["series"]);
-    let first = series.iter().position(|s| s["php"].as_f64().unwrap_or(0.) + s["services"].as_f64().unwrap_or(0.) > 0.).unwrap_or(0);
+    let first = series.iter().position(|s| s["mem_used"].as_f64().unwrap_or(0.) > 0.).unwrap_or(series.len());
     let series: Vec<Value> = series[first..].to_vec();
-    let totals: Vec<f64> = series.iter().map(|s| ["php", "sites", "services", "web"].iter().map(|k| s[*k].as_f64().unwrap_or(0.)).sum()).collect();
-    let median = { let mut v = totals.clone(); v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)); v.get(v.len() / 2).copied().unwrap_or(0.) };
-    let warm = totals.iter().position(|t| *t >= median * 0.7).unwrap_or(0);
-    let series: Vec<Value> = series[warm..].to_vec();
-    let rows: Vec<[f64; 4]> = series.iter().map(|s| [s["php"].as_f64().unwrap_or(0.), s["sites"].as_f64().unwrap_or(0.), s["services"].as_f64().unwrap_or(0.), s["web"].as_f64().unwrap_or(0.)]).collect();
-    let group_now = |f: &dyn Fn(&str) -> bool| -> u64 { procs.iter().filter(|x| f(&txt(&x["group"]))).filter_map(|x| x["memory"].as_u64()).sum() };
-    let now_vals = [group_now(&|g| g == "php"), group_now(&|g| g.starts_with("site:")), group_now(&|g| g == "service"), group_now(&|g| g == "web")];
-    let labels = ["PHP pools", "Site processes", "Services", "Web server"];
-    let legend = div().flex().flex_row().flex_wrap().gap(px(26.)).px(px(18.)).pt(px(16.))
-        .children((0..4).map(|k| div().flex().flex_row().items_center().gap(px(8.)).text_size(px(14.)).text_color(pp.text2)
-            .child(div().size(px(10.)).rounded(px(3.)).bg(pp.series[k])).child(labels[k]).child(div().font_weight(FontWeight::SEMIBOLD).text_color(pp.text).child(mb(now_vals[k])))));
+    let sys_cpu: Vec<f64> = series.iter().map(|s| s["sys_cpu"].as_f64().unwrap_or(0.)).collect();
+    let tez_cpu: Vec<f64> = series.iter().map(|s| s["cpu"].as_f64().unwrap_or(0.)).collect();
+    let used: Vec<f64> = series.iter().map(|s| s["mem_used"].as_f64().unwrap_or(0.)).collect();
+    let tez_used: Vec<f64> = series.iter().map(|s| ["php", "sites", "services", "web"].iter().map(|k| s[*k].as_f64().unwrap_or(0.)).sum()).collect();
     let range = if t.range.is_empty() { "1h".to_string() } else { t.range.clone() };
     let range_label = match range.as_str() { "15m" => "last 15 minutes", "24h" => "last 24 hours", _ => "last hour" };
-    let hover = t.hover_x;
-    let cell: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
-    let peak = rows.iter().map(|r| r.iter().sum::<f64>()).fold(0., f64::max).max(1.);
-    let gib = (1u64 << 30) as f64;
-    let step = [0.25 * gib, 0.5 * gib, gib, 2. * gib, 4. * gib, 8. * gib, 16. * gib].into_iter().find(|s| peak / s <= 4.).unwrap_or(16. * gib);
-    let scale = ((peak / step).floor() + 1.) * step;
-    let ticks: Vec<f64> = (1..).map(|k| k as f64 * step).take_while(|v| *v < scale + 1.).collect();
-    let chart_area: AnyElement = if rows.len() >= 2 {
-        let c3 = cell.clone();
-        let tip = hover.map(|f| {
-            let i = ((rows.len() - 1) as f32 * f).round() as usize;
-            let r = rows[i.min(rows.len() - 1)];
-            let tsec = series.get(i).and_then(|s| s["t"].as_u64()).unwrap_or(0);
-            let ago_s = m["now"].as_u64().unwrap_or(tsec).saturating_sub(tsec);
-            (f, r, if ago_s < 30 { "now".to_string() } else { format!("{} ago", ago(ago_s)) })
-        });
-        div().id("memchart").relative().h(px(220.)).mx(px(18.)).mt(px(34.)).mb(px(26.))
-            .on_mouse_move(move |ev: &MouseMoveEvent, _, cx| {
-                if let Some(b) = c3.get() {
-                    let f = (f32::from(ev.position.x - b.origin.x) / f32::from(b.size.width)).clamp(0., 1.);
-                    cx.global_mut::<Tez>().hover_x = Some(f);
-                    cx.refresh_windows();
-                }
-            })
-            .on_hover(|h, _, cx| if !*h { cx.global_mut::<Tez>().hover_x = None; cx.refresh_windows(); })
-            .child(div().absolute().left(px(56.)).top_0().bottom_0().right_0().child(stacked_chart(p, rows.clone(), scale, ticks.clone(), hover, cell.clone())))
-            .children(ticks.iter().map(|t| div().absolute().left_0().w(px(48.)).top(relative(1. - (*t / scale) as f32)).mt(px(-9.)).text_size(px(12.)).text_color(pp.text3).child(mb(*t as u64))))
-            .child(div().absolute().left(px(56.)).bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child(series.first().and_then(|s| s["t"].as_u64()).map(|t0| format!("{} ago", ago(m["now"].as_u64().unwrap_or(t0).saturating_sub(t0)))).unwrap_or_default()))
-            .child(div().absolute().right_0().bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child("now"))
-            .when_some(tip, |d, (f, r, when)| {
-                let total: f64 = r.iter().sum();
-                let left = if f > 0.6 { relative(f - 0.28) } else { relative(f + 0.02) };
-                d.child(div().absolute().top(px(6.)).left(left).ml(px(56.)).w(px(220.)).p(px(12.)).rounded(px(12.)).bg(pp.surface2).border_1().border_color(pp.line2).shadow_lg()
-                    .flex().flex_col().gap(px(4.)).text_size(px(13.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{when} · {}", mb(total as u64))))
-                    .children((0..4).map(|k| div().flex().flex_row().justify_between().text_color(pp.text2).child(labels[k]).child(mb(r[k] as u64)))))
-            })
-            .into_any_element()
-    } else {
-        div().h(px(120.)).mx(px(18.)).mt(px(14.)).flex().items_center().justify_center().child(muted(p, "Collecting memory samples. The graph fills in over the next minute.")).into_any_element()
-    };
     let total = machine["total"].as_u64().unwrap_or(0);
     let avail = machine["available"].as_u64().unwrap_or(0);
-    let mem_card = cardbox(p).pb(px(14.))
-        .child(div().flex().flex_row().items_center().px(px(18.)).pt(px(16.))
-            .child(div().flex_1().flex().flex_col().gap(px(2.)).child(strong(p, "Memory")).child(muted(p, format!("used by tez, {range_label}"))))
-            .child(div().text_size(px(26.)).child(mb(tez_mem))))
-        .child(chart_area).child(legend);
-    let mrow = |label: &str, value: String, color: Hsla| div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(14.5))
-        .child(div().text_color(color).child(label.to_string())).child(value);
-    let other = total.saturating_sub(avail).saturating_sub(tez_mem).saturating_sub(wsl);
-    let mut machine_card = cardbox(p).pb(px(10.))
-        .child(div().flex().flex_col().gap(px(2.)).px(px(18.)).pt(px(16.)).pb(px(8.)).child(strong(p, "The machine"))
-            .child(muted(p, if total > 0 { format!("{} of memory in all", mb(total)) } else { "memory and disk".into() })));
-    if total > 0 {
-        machine_card = machine_card
-            .child(div().mx(px(18.)).my(px(6.)).flex().flex_row().h(px(8.)).rounded(px(4.)).overflow_hidden().gap(px(2.))
-                .children([(tez_mem, pp.text), (wsl, pp.amber), (other, pp.line2), (avail, pp.surface3)].into_iter().filter(|(v, _)| *v > 0)
-                    .map(|(v, c)| div().h_full().w(relative(v as f32 / total as f32)).bg(c))))
-            .child(mrow("tez", mb(tez_mem), pp.text))
-            .when(wsl > 0, |d| d.child(mrow("WSL", mb(wsl), pp.amber)))
-            .child(mrow("Other apps", mb(other), pp.text2))
-            .child(mrow("Free", mb(avail), pp.green));
+    let used_now = total.saturating_sub(avail);
+    let cpu_now = machine["cpu"].as_f64().unwrap_or(0.);
+    let cores = machine["cpus"].as_u64().unwrap_or(0);
+    let since = series.first().and_then(|s| s["t"].as_u64()).map(|t0| format!("{} ago", ago(m["now"].as_u64().unwrap_or(t0).saturating_sub(t0)))).unwrap_or_default();
+    let legend2 = |a: &str, ca: Hsla, b: &str, cb: Hsla| div().flex().flex_row().gap(px(18.)).px(px(18.)).pt(px(4.)).text_size(px(13.5)).text_color(pp.text2)
+        .child(div().flex().flex_row().items_center().gap(px(8.)).child(div().w(px(14.)).h(px(2.)).bg(ca)).child(a.to_string()))
+        .child(div().flex().flex_row().items_center().gap(px(8.)).child(div().w(px(14.)).h(px(2.)).bg(cb)).child(b.to_string()));
+    let chart = |lines: Vec<(Vec<f64>, Hsla)>, max: f64, ticks: Vec<(f64, String)>| -> AnyElement {
+        if lines.first().map(|l| l.0.len() < 2).unwrap_or(true) {
+            return div().h(px(150.)).mx(px(18.)).flex().items_center().justify_center().child(muted(&pp, "Collecting samples; the graph fills in within a minute.")).into_any_element();
+        }
+        div().relative().h(px(150.)).mx(px(18.)).mt(px(16.)).mb(px(26.))
+            .child(div().absolute().left(px(56.)).top_0().bottom_0().right_0().child(line_chart(&pp, lines, max)))
+            .children(ticks.into_iter().map(|(v, l)| div().absolute().left_0().w(px(52.)).top(relative(1. - (v / max) as f32)).mt(px(-9.)).text_size(px(12.)).text_color(pp.text3).child(l)))
+            .child(div().absolute().left(px(56.)).bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child(since.clone()))
+            .child(div().absolute().right_0().bottom(px(-22.)).text_size(px(12.)).text_color(pp.text3).child("now"))
+            .into_any_element()
+    };
+    let head = |title: &str, sub_t: String, big: String, small: String| div().flex().flex_row().items_start().px(px(18.)).pt(px(16.))
+        .child(div().flex_1().flex().flex_col().gap(px(2.)).child(strong(&pp, title.to_string())).child(muted(&pp, sub_t)))
+        .child(div().flex().flex_col().items_end().gap(px(2.)).child(div().text_size(px(26.)).child(big)).child(muted(&pp, small)));
+    let cpu_card = cardbox(p).pb(px(14.))
+        .child(head("CPU", format!("{cores} cores · {range_label}"), format!("{cpu_now:.0}%"), format!("tez {cpu:.1}%")))
+        .child(chart(vec![(sys_cpu, pp.text2), (tez_cpu, pp.series[0])], 100., vec![(25., "25%".into()), (50., "50%".into()), (75., "75%".into()), (100., "100%".into())]))
+        .child(legend2("This computer", pp.text2, "tez", pp.series[0]));
+    let gib = (1u64 << 30) as f64;
+    let ram_max = (total as f64).max(gib);
+    let step = if ram_max > 48. * gib { 16. * gib } else if ram_max > 24. * gib { 8. * gib } else { 4. * gib };
+    let ram_ticks: Vec<(f64, String)> = (1..).map(|k| k as f64 * step).take_while(|v| *v <= ram_max + 1.).map(|v| (v, mb(v as u64))).collect();
+    let other = used_now.saturating_sub(tez_mem).saturating_sub(wsl);
+    let segs = [(tez_mem, pp.series[0], "tez"), (wsl, pp.amber, "WSL"), (other, pp.line2, "Other apps"), (avail, pp.surface3, "Free")];
+    let ram_card = cardbox(p).pb(px(16.))
+        .child(head("Memory (RAM)", format!("{} in all · {range_label}", mb(total)), format!("{} used", mb(used_now)), format!("{} free", mb(avail))))
+        .child(chart(vec![(used, pp.text2), (tez_used, pp.series[0])], ram_max, ram_ticks))
+        .child(legend2("Used by everything", pp.text2, "tez", pp.series[0]))
+        .when(total > 0, |d| d.child(div().flex().flex_col().gap(px(8.)).px(px(18.)).pt(px(14.))
+            .child(div().flex().flex_row().h(px(8.)).rounded(px(4.)).overflow_hidden().gap(px(2.))
+                .children(segs.iter().filter(|(v, _, _)| *v > 0).map(|(v, c, _)| div().h_full().w(relative(*v as f32 / total as f32)).bg(*c))))
+            .child(div().flex().flex_row().flex_wrap().gap(px(18.)).text_size(px(13.5)).text_color(pp.text2)
+                .children(segs.iter().filter(|(v, _, _)| *v > 0).map(|(v, c, l)| div().flex().flex_row().items_center().gap(px(6.)).child(div().size(px(8.)).rounded(px(2.)).bg(*c)).child(format!("{l} {}", mb(*v))))))));
+    out = out.child(grid_of(vec![cpu_card.into_any_element(), ram_card.into_any_element()], 2));
+
+    // What inside tez costs the most, and the disk.
+    let mut pools: Vec<(String, u64, f64)> = Vec::new();
+    for x in &procs {
+        let key = pool_name(&txt(&x["name"]));
+        let (mem, c) = (x["memory"].as_u64().unwrap_or(0), x["cpu"].as_f64().unwrap_or(0.));
+        match pools.iter_mut().find(|(k, _, _)| *k == key) { Some(e) => { e.1 += mem; e.2 += c; } None => pools.push((key, mem, c)) }
     }
-    machine_card = machine_card.child(div().mx(px(18.)).my(px(6.)).h(px(1.)).bg(pp.cardline))
-        .child(mrow("Disk free", mb(disk_free), if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text }))
+    pools.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal).then(b.1.cmp(&a.1)));
+    let consumers = cardbox(p).pb(px(6.))
+        .child(div().flex().flex_row().items_center().px(px(18.)).pt(px(16.)).pb(px(10.)).child(div().flex_1().child(strong(p, "Busiest in tez"))).child(div().w(px(70.)).flex().justify_end().child(muted(p, "CPU"))).child(div().w(px(80.)).flex().justify_end().child(muted(p, "RAM"))))
+        .children(pools.into_iter().take(6).map(|(name, mem, c)| div().flex().flex_row().items_center().px(px(18.)).py(px(9.)).border_t_1().border_color(pp.cardline).text_size(px(14.5))
+            .child(div().flex_1().min_w(px(0.)).truncate().child(name))
+            .child(div().w(px(70.)).flex().justify_end().text_color(if c > 25. { pp.amber } else { pp.text }).child(format!("{c:.1}%")))
+            .child(div().w(px(80.)).flex().justify_end().text_color(if mem > 1 << 30 { pp.amber } else { pp.text }).child(mb(mem)))));
+    let disk_total = machine["disk_total"].as_u64().unwrap_or(0);
+    let disk_card = cardbox(p).pb(px(10.))
+        .child(div().flex().flex_col().gap(px(2.)).px(px(18.)).pt(px(16.)).pb(px(8.)).child(strong(p, "Disk")).child(muted(p, "the drive that holds tez and your sites")))
+        .when(disk_total > 0, |d| d.child(div().mx(px(18.)).my(px(6.)).h(px(8.)).rounded(px(4.)).bg(pp.surface3).overflow_hidden()
+            .child(div().h_full().w(relative(1. - disk_free as f32 / disk_total as f32)).bg(if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text2 }))))
+        .child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(14.5)).child(div().text_color(if disk_free < 20 * (1 << 30) { pp.amber } else { pp.text }).child("Free")).child(mb(disk_free)))
+        .when(disk_total > 0, |d| d.child(div().flex().flex_row().justify_between().px(px(18.)).py(px(8.)).text_size(px(14.5)).child(div().text_color(pp.text2).child("Size")).child(mb(disk_total))))
         .when(cache > 0, |d| d.child(div().flex().flex_row().items_center().pl(px(18.)).pr(px(8.)).py(px(4.)).text_size(px(14.5))
             .child(div().flex_1().text_color(pp.text2).child(format!("Download cache {}", mb(cache))))
-            .child(text_btn("mc-clear", &pp, "Clear").on_click(|_, _, cx| send(cx, "/api/cache/clear".into(), json!({}), "Cleared the download cache")))));
-    out = out.child(div().flex().flex_row().gap(px(14.)).items_start().child(mem_card.flex_1().min_w(px(0.))).child(machine_card.flex_none().w(px(320.))));
+            .child(text_btn("dk-clear", &pp, "Clear").on_click(|_, _, cx| send(cx, "/api/cache/clear".into(), json!({}), "Cleared the download cache")))));
+    out = out.child(grid_of(vec![consumers.into_any_element(), disk_card.into_any_element()], 2));
 
     out = out.child(site_cards(p, cx));
     // Services as cards.
@@ -756,7 +748,7 @@ fn site_overview(p: &Pal, name: &str, s: &Value, d: &Value, live: &[Value], wind
             .child(div().flex().flex_row().gap(px(18.)).px(px(18.)).pt(px(14.)).text_size(px(13.5)).text_color(pp.text2)
                 .child(div().flex().flex_row().items_center().gap(px(8.)).child(div().w(px(14.)).h(px(2.)).bg(pp.series[0])).child("p95"))
                 .child(div().flex().flex_row().items_center().gap(px(8.)).child(div().w(px(14.)).h(px(2.)).bg(pp.series[1])).child("p50")))
-            .child(div().h(px(130.)).mx(px(18.)).mt(px(8.)).child(line_chart(p, vec![(p95, pp.series[0]), (p50, pp.series[1])])));
+            .child(div().h(px(130.)).mx(px(18.)).mt(px(8.)).child(line_chart(p, vec![(p95.clone(), pp.series[0]), (p50.clone(), pp.series[1])], p95.iter().chain(p50.iter()).copied().fold(0., f64::max) * 1.2)));
         let routes = arr(&mm["routes"]);
         if !routes.is_empty() {
             perf = perf.child(div().flex().flex_row().gap(px(12.)).px(px(18.)).pt(px(22.)).pb(px(10.)).border_b_1().border_color(pp.line).text_size(px(13.5)).text_color(pp.text3)

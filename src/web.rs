@@ -147,6 +147,11 @@ pub fn effective_ports(cfg: &Config) -> (u16, u16, Vec<String>) {
     let saved = paths::run_dir().join("web-ports");
     // While our server runs it holds the ports itself, so reuse what it was started with.
     if util::port_open(2019) {
+        // The running server's own Caddyfile is the truth; the saved file can be stale.
+        if let Ok(c) = std::fs::read_to_string(paths::config_dir().join("Caddyfile")) {
+            let port = |key: &str| c.lines().find_map(|l| l.trim().strip_prefix(key).and_then(|v| v.trim().parse::<u16>().ok()));
+            if let (Some(h), Some(s)) = (port("http_port"), port("https_port")) { return (h, s, Vec::new()); }
+        }
         if let Ok(t) = std::fs::read_to_string(&saved) {
             let v: Vec<u16> = t.split_whitespace().filter_map(|x| x.parse().ok()).collect();
             if v.len() == 2 { return (v[0], v[1], Vec::new()); }
