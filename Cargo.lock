@@ -6438,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "tez"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "rcgen",
  "serde",
@@ -6449,7 +6449,7 @@ dependencies = [
 
 [[package]]
 name = "tez-app"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "gpui-kit",
  "serde",

@@ -1,6 +1,6 @@
 [package]
 name = "tez"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 description = "Fast, native Laravel development for Windows, macOS and Linux: every PHP and Node.js version, PostgreSQL, MySQL, Redis, Meilisearch, Mailpit, S3 and Horizon, from one binary."
 license = "MIT"
@@ -26,3 +26,37 @@ panic = "abort"
 
 [dev-dependencies]
 x509-parser = { version = "0.18.1", features = ["verify"] }
+
+# Linux packages, built after `cargo build --release --workspace`:
+#   cargo deb --no-build      (Debian, Ubuntu)
+#   cargo generate-rpm        (Fedora, RHEL)
+[package.metadata.deb]
+maintainer = "Amritpal Singh <boparaiamrit@gmail.com>"
+copyright = "2026, Amritpal Singh"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+One program that installs and runs everything a Laravel project needs as native processes: \
+every PHP and Node.js version, a web server with local HTTPS, PostgreSQL, MySQL, MariaDB, \
+MongoDB, Redis, Meilisearch, S3 storage and a mail catcher, plus each project's Horizon, Reverb, \
+Vite and scheduler. Includes the tez-app desktop app. After installing, run `tez install`."""
+section = "devel"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/tez", "usr/bin/", "755"],
+    ["target/release/tez-app", "usr/bin/", "755"],
+    ["packaging/linux/tez.desktop", "usr/share/applications/", "644"],
+    ["app/assets/icon/tez.png", "usr/share/icons/hicolor/512x512/apps/tez.png", "644"],
+    ["README.md", "usr/share/doc/tez/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Fast, native Laravel development"
+assets = [
+    { source = "target/release/tez", dest = "/usr/bin/tez", mode = "755" },
+    { source = "target/release/tez-app", dest = "/usr/bin/tez-app", mode = "755" },
+    { source = "packaging/linux/tez.desktop", dest = "/usr/share/applications/tez.desktop", mode = "644" },
+    { source = "app/assets/icon/tez.png", dest = "/usr/share/icons/hicolor/512x512/apps/tez.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/tez/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/tez/LICENSE", mode = "644", doc = true },
+]

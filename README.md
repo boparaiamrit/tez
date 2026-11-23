@@ -84,27 +84,41 @@ tez attacks those costs one by one:
 
 ## Install
 
-Download the build for your system from the
+Download the package for your system from the
 [latest release](https://github.com/boparaiamrit/tez/releases/latest):
 
-| System | Download |
-| --- | --- |
-| Windows (x64) | `tez-<version>-windows-x64.zip` |
-| macOS (Apple silicon) | `tez-<version>-macos-arm64.dmg`, plus a CLI-only `.tar.gz` |
-| Linux (x64) | `tez-<version>-linux-x64.tar.gz` |
+| System | Installer | Or unpack it yourself |
+| --- | --- | --- |
+| Windows (x64) | `tez-<version>-windows-x64-setup.exe` | `tez-<version>-windows-x64.zip` |
+| macOS (Apple silicon) | `tez-<version>-macos-arm64.dmg` | `tez-<version>-macos-arm64-cli.tar.gz` (command line only) |
+| Ubuntu, Debian (x64) | `tez-<version>-linux-x64.deb` | `tez-<version>-linux-x64.tar.gz` |
+| Fedora, RHEL (x64) | `tez-<version>-linux-x64.rpm` | `tez-<version>-linux-x64.tar.gz` |
 
-Each release is built, smoke-tested and packaged by GitHub Actions on its own operating system.
-The macOS app is not notarised yet: the first time, right-click it and choose Open.
+Each release is built, smoke-tested and packaged by GitHub Actions on its own operating system,
+and every installer is installed, run and removed there before it is published.
 
-Then install everything tez runs:
+**Windows.** Run the setup. It needs no administrator rights: it installs for your account, sets
+up PHP, the web server and services, adds tez to the Start menu and starts it. Uninstall it from
+Settings → Apps; your databases and settings stay in `%USERPROFILE%\.tez`. The installer is not
+code-signed yet, so SmartScreen may warn the first time: choose **More info**, then **Run anyway**.
 
-```powershell
-tez install --all     # or plain `tez install` for the default PHP, PostgreSQL, Redis and Mailpit
+**Linux.**
+
+```bash
+sudo apt install ./tez-<version>-linux-x64.deb     # Ubuntu, Debian
+sudo dnf install ./tez-<version>-linux-x64.rpm     # Fedora, RHEL
+tez install                                        # then, as yourself: PHP, the web server, services
 ```
 
-`install --all` downloads PHP 7.4 to 8.6, the Caddy web server, PostgreSQL 17 with TimescaleDB,
-Redis, Mailpit, Meilisearch, RustFS and, if you have no Node.js yet, the newest LTS into `~/.tez`. It also puts tez's
-`php`, `composer`, `node` and `npm` first in every new terminal. Open a new terminal afterwards.
+**macOS.** Open the `.dmg` and drag tez to Applications. It is not notarised yet: the first time,
+right-click it and choose Open. Then, in a terminal:
+`/Applications/Tez.app/Contents/MacOS/tez install` (after that, `tez` is on your PATH).
+
+`tez install --all` downloads PHP 7.4 to 8.6, the Caddy web server, PostgreSQL 17 with
+TimescaleDB, Redis, Mailpit, Meilisearch, RustFS and, if you have no Node.js yet, the newest LTS
+into `~/.tez`. Plain `tez install` (what the Windows setup runs) installs the default PHP plus
+PostgreSQL, Redis and Mailpit. Either way it puts tez's `php`, `composer`, `node` and `npm` first
+in every new terminal, so open a new terminal afterwards.
 
 <details>
 <summary>Build from source</summary>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=tez
+GenericName=Laravel development environment
+Comment=Fast, native Laravel development
+Exec=tez-app
+Icon=tez
+Terminal=false
+Type=Application
+Categories=Development;
+Keywords=laravel;php;node;postgres;redis;
