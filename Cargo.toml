@@ -1,10 +1,12 @@
 [package]
 name = "tez"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
-description = "A fast, native Laravel development environment for Windows: every PHP version, PostgreSQL with TimescaleDB, Redis, Meilisearch, Mailpit, S3 and Horizon, from one binary."
+description = "Fast, native Laravel development for Windows, macOS and Linux: every PHP and Node.js version, PostgreSQL, MySQL, Redis, Meilisearch, Mailpit, S3 and Horizon, from one binary."
 license = "MIT"
-authors = ["Amritpal Singh"]
+authors = ["Amritpal Singh <boparaiamrit@gmail.com>"]
+repository = "https://github.com/boparaiamrit/tez"
+homepage = "https://github.com/boparaiamrit/tez"
 
 [workspace]
 members = ["app"]
