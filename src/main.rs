@@ -19,6 +19,7 @@ mod php;
 mod project;
 mod remove;
 mod services;
+mod shellpath;
 mod shim;
 mod sites;
 mod spec;

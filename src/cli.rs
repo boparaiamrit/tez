@@ -282,45 +282,6 @@ fn install_composer() -> R<()> {
     Ok(())
 }
 
-fn user_path() -> String {
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"])
-        .output();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
-}
-
-/// macOS/Linux: one guarded line in the shell start-up files that exist (zsh, bash, profile).
-fn ensure_on_path_unix() -> R<bool> {
-    let bin = paths::bin().display().to_string();
-    let line = format!("export PATH=\"{bin}:$PATH\"  # tez");
-    let home = paths::user_home();
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let mut files: Vec<PathBuf> = [".zshrc", ".bashrc", ".profile"].iter().map(|f| home.join(f)).filter(|p| p.exists()).collect();
-    // A new account may have none yet: create the one its shell reads.
-    if files.is_empty() { files.push(home.join(if shell.ends_with("zsh") { ".zshrc" } else { ".profile" })); }
-    let mut added = false;
-    for f in files {
-        let text = std::fs::read_to_string(&f).unwrap_or_default();
-        if text.lines().any(|l| l.contains(&bin) && l.contains("PATH")) { continue; }
-        let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
-        std::fs::write(&f, format!("{text}{sep}{line}\n"))?;
-        added = true;
-    }
-    Ok(added)
-}
-
-fn ensure_on_path() -> R<bool> {
-    if !cfg!(windows) { return ensure_on_path_unix(); }
-    let bin = paths::bin().display().to_string();
-    let current = user_path();
-    if current.split(';').any(|p| p.trim_end_matches('\\').eq_ignore_ascii_case(&bin)) { return Ok(false); }
-    let new = if current.is_empty() { bin.clone() } else { format!("{bin};{current}") };
-    let script = format!("[Environment]::SetEnvironmentVariable('Path', '{}', 'User')", new.replace('\'', "''"));
-    let st = std::process::Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status()?;
-    if !st.success() { bail!("could not add {bin} to your PATH"); }
-    Ok(true)
-}
-
 fn install(rest: &[&str]) -> R<()> {
     paths::ensure_dirs()?;
     let fresh = !paths::config_file().exists();
@@ -372,8 +333,9 @@ fn install(rest: &[&str]) -> R<()> {
         let version = if sc.version.is_empty() { services::info(&name)?.version.to_string() } else { sc.version.clone() };
         if sc.enabled && !services::is_installed(&name, &version) { services::install(&name, Some(&version))?; }
     }
-    if ensure_on_path()? {
-        util::ok(&format!("Added {} to your PATH (open a new terminal to use `php`, `composer` and `tez`)", paths::bin().display()));
+    let changed = crate::shellpath::ensure()?;
+    if !changed.is_empty() {
+        util::ok(&format!("New terminals find tez's php, composer, node and npm first ({}); open a new terminal to use them", changed.join(", ")));
     }
     println!();
     util::ok(&bold("tez is installed"));

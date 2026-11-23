@@ -121,6 +121,13 @@ pub fn exe(dir: &Path) -> PathBuf { bin_dir(dir).join(sys::exe("node")) }
 /// npm and corepack: node_modules beside node.exe on Windows, lib/node_modules elsewhere.
 fn modules(dir: &Path) -> PathBuf { if cfg!(windows) { dir.join("node_modules") } else { dir.join("lib").join("node_modules") } }
 
+/// Where `npm install -g` puts packages on every tez Node.js (each version's own npmrc points
+/// here), so the tools it adds stay on PATH whichever version runs.
+pub fn global_prefix() -> PathBuf { paths::home().join("npm") }
+/// The folder with those tools' commands, which goes on PATH after tez's own.
+pub fn global_bin() -> PathBuf { if cfg!(windows) { global_prefix() } else { global_prefix().join("bin") } }
+fn global_modules() -> PathBuf { modules(&global_prefix()) }
+
 /// A version string tez can use as a folder name: digits and dots only.
 fn valid(v: &str) -> bool { !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') && !v.contains("..") }
 
@@ -347,16 +354,21 @@ fn command_on(version: &str, tool: &str) -> Option<(PathBuf, Vec<String>)> {
     let d = dir(version);
     let node = exe(&d);
     if !node.exists() { return None; }
-    let m = modules(&d);
+    let (m, g) = (modules(&d), global_modules());
     let js = |p: PathBuf| p.exists().then(|| (node.clone(), vec![p.display().to_string()]));
+    // In this version's folder, then among the shared global tools.
+    let either = |rel: &[&str]| {
+        let at = |base: &Path| rel.iter().fold(base.to_path_buf(), |p, r| p.join(r));
+        js(at(&m)).or_else(|| js(at(&g)))
+    };
     match tool {
         "node" => Some((node.clone(), Vec::new())),
         "npm" => js(m.join("npm").join("bin").join("npm-cli.js")),
         "npx" => js(m.join("npm").join("bin").join("npx-cli.js")),
-        "corepack" => js(m.join("corepack").join("dist").join("corepack.js")),
+        "corepack" => either(&["corepack", "dist", "corepack.js"]),
         // A global install (npm install -g pnpm) first, then corepack's.
-        "pnpm" => js(m.join("pnpm").join("bin").join("pnpm.cjs")).or_else(|| js(m.join("corepack").join("dist").join("pnpm.js"))),
-        "yarn" => js(m.join("yarn").join("bin").join("yarn.js")).or_else(|| js(m.join("corepack").join("dist").join("yarn.js"))),
+        "pnpm" => either(&["pnpm", "bin", "pnpm.cjs"]).or_else(|| either(&["corepack", "dist", "pnpm.js"])),
+        "yarn" => either(&["yarn", "bin", "yarn.js"]).or_else(|| either(&["corepack", "dist", "yarn.js"])),
         _ => None,
     }
 }
@@ -383,8 +395,8 @@ fn path_with(first: &Path) -> String {
 
 fn missing_tool(tool: &str, version: &str) -> String {
     match tool {
-        "pnpm" | "yarn" => format!("tez: Node.js {version} has no corepack (Node.js 25 and later leave it out), so {tool} is not available. Install it with `npm install -g {tool}`, or use Node.js 24: tez node install 24"),
-        "corepack" => format!("tez: Node.js {version} has no corepack (Node.js 25 and later leave it out)"),
+        "pnpm" | "yarn" => format!("tez: Node.js {version} has no corepack (Node.js 25 and later leave it out), so {tool} is not available. Add it: tez node install {version}"),
+        "corepack" => format!("tez: Node.js {version} has no corepack (Node.js 25 and later leave it out). Add it: tez node install {version}"),
         _ => format!("tez: {tool} is missing from Node.js {version}; reinstall it: tez node remove {version} && tez node install {version}"),
     }
 }
@@ -423,8 +435,44 @@ pub fn shim(tool: &str, args: &[String]) -> i32 {
     let Some((exe, pre)) = command_on(&version, tool) else { eprintln!("{}", missing_tool(tool, &version)); return 1 };
     let mut c = Command::new(exe);
     c.args(pre).args(args).env("PATH", path_with(&bin_dir(&dir(&version))));
-    if matches!(tool, "pnpm" | "yarn" | "corepack") { c.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0"); }
+    if matches!(tool, "pnpm" | "yarn" | "corepack") { corepack_env(&mut c, &version); }
     crate::shim::run(c)
+}
+
+/// corepack's own folder, where it keeps one "last known good" pnpm and yarn for every Node.js.
+fn corepack_home() -> PathBuf {
+    if let Some(h) = std::env::var_os("COREPACK_HOME") { return PathBuf::from(h); }
+    let cache = std::env::var_os("XDG_CACHE_HOME").or_else(|| std::env::var_os("LOCALAPPDATA")).map(PathBuf::from)
+        .unwrap_or_else(|| paths::user_home().join(if cfg!(windows) { "AppData/Local" } else { ".cache" }));
+    cache.join("node").join("corepack")
+}
+
+/// Whether the pnpm and yarn corepack would pick can run on `version`, by the Node.js range in each
+/// one's package.json. None when corepack has picked none yet.
+fn shared_corepack_fits(version: &str) -> Option<bool> {
+    let home = corepack_home();
+    let good: Value = serde_json::from_str(&std::fs::read_to_string(home.join("lastKnownGood.json")).ok()?).ok()?;
+    let mut any = false;
+    for tool in ["pnpm", "yarn"] {
+        let Some(v) = good[tool].as_str() else { continue };
+        any = true;
+        let v = v.split('+').next().unwrap_or(v);
+        let pkg: Option<Value> = std::fs::read_to_string(home.join("v1").join(tool).join(v).join("package.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(range) = pkg.as_ref().and_then(|p| p["engines"]["node"].as_str()) {
+            if !satisfies(version, range) { return Some(false); }
+        }
+    }
+    any.then_some(true)
+}
+
+/// pnpm, yarn and corepack use corepack's shared folder when the pnpm and yarn it keeps run on
+/// this version (pnpm 11 needs Node.js 22.13). Otherwise this major gets a folder of its own,
+/// with the pnpm and yarn its corepack shipped with. A COREPACK_HOME the user set is left alone.
+fn corepack_env(c: &mut Command, version: &str) {
+    c.env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+    if std::env::var_os("COREPACK_HOME").is_some() || shared_corepack_fits(version) == Some(true) { return; }
+    c.env("COREPACK_HOME", paths::home().join("corepack").join(major(version).to_string()));
+    if std::env::var_os("COREPACK_DEFAULT_TO_LATEST").is_none() { c.env("COREPACK_DEFAULT_TO_LATEST", "0"); }
 }
 
 // ---------------------------------------------------------------- install, default, remove
@@ -445,7 +493,11 @@ pub fn install(spec: &str) -> R<String> {
     let spec = if spec.trim().is_empty() { "lts" } else { spec.trim() };
     let version = pick(spec, &list).cloned().ok_or_else(|| format!("no Node.js release matches '{spec}' on this system (tez node available)"))?;
     let dest = dir(&version);
-    if exe(&dest).exists() { util::ok(&format!("Node.js {version} is already installed")); return Ok(version); }
+    if exe(&dest).exists() {
+        util::ok(&format!("Node.js {version} is already installed"));
+        prepare(&version);
+        return Ok(version);
+    }
     // The archive is about 30 MB and unpacks to about 100 MB.
     fetch::ensure_space(&paths::home(), 300 << 20)?;
     let file = format!("node-v{version}-{suffix}.{ext}");
@@ -459,9 +511,54 @@ pub fn install(spec: &str) -> R<String> {
     let _ = std::fs::remove_file(&archive);
     if !exe(&dest).exists() { bail!("the Node.js {version} archive has no {}", exe(&dest).display()); }
     fetch::make_executable(&exe(&dest))?;
+    prepare(&version);
     let extra = if has_corepack(&dest) { ", pnpm and yarn through corepack" } else { "" };
     util::ok(&format!("Node.js {version} with npm {}{extra}", npm_version(&dest).unwrap_or_else(|| "?".into())));
     Ok(version)
+}
+
+/// Ready an installed version: its npm puts global tools in the shared folder (the user's own
+/// npmrc still wins), and a release without corepack (Node.js 25 and later) gets it from npm, so
+/// pnpm and yarn work on every version. Safe to run again.
+fn prepare(version: &str) {
+    let d = dir(version);
+    if let Err(e) = share_globals(&d) { util::warn(&format!("npm on Node.js {version} keeps its own global folder ({e})")); }
+    if has_corepack(&d) { return; }
+    util::step(&format!("Adding corepack to Node.js {version}, for pnpm and yarn"));
+    if let Err(e) = add_corepack(&d) {
+        util::warn(&format!("corepack was not added ({e}); pnpm and yarn need it. Try again later: tez node install {version}"));
+    }
+}
+
+/// `prefix=` in the npmrc that ships inside npm (the lowest-ranked one), as the Node.js
+/// installer for Windows does.
+fn share_globals(d: &Path) -> R<()> {
+    let rc = modules(d).join("npm").join("npmrc");
+    let line = format!("prefix={}", global_prefix().display());
+    let text = std::fs::read_to_string(&rc).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == line) { return Ok(()); }
+    std::fs::create_dir_all(global_bin())?;
+    let mut out: String = text.lines().filter(|l| !l.trim_start().starts_with("prefix")).map(|l| format!("{l}\n")).collect();
+    out.push_str(&line);
+    out.push('\n');
+    std::fs::write(&rc, out)?;
+    Ok(())
+}
+
+fn add_corepack(d: &Path) -> R<()> {
+    use crate::sys::Hidden;
+    let npm = modules(d).join("npm").join("bin").join("npm-cli.js");
+    // --prefix: into this version's own folder, where the shims look for it.
+    let out = Command::new(exe(d)).arg(&npm)
+        .args(["install", "--global", "--prefix"]).arg(d)
+        .args(["--no-fund", "--no-audit", "--loglevel=error", "corepack"])
+        .env("PATH", path_with(&bin_dir(d)))
+        .hidden().output()?;
+    if !out.status.success() || !has_corepack(d) {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("{}", err.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("npm failed"));
+    }
+    Ok(())
 }
 
 /// `tez install`: the newest LTS when tez has no Node.js yet.
@@ -582,11 +679,27 @@ pub fn apply_site(entry: &mut SiteSettings, body: &Value) -> R<Option<String>> {
 
 fn reload_daemon() { if crate::api::running() { let _ = crate::api::call("POST", "/api/reload"); } }
 
+/// After an install: new terminals find tez's node and npm before any other Node.js.
+fn put_first_on_path() {
+    match crate::shellpath::ensure() {
+        Ok(c) if !c.is_empty() => util::ok(&format!("New terminals find tez's node, npm and php first ({}); open a new terminal to use them", c.join(", "))),
+        Ok(_) => {}
+        Err(e) => util::warn(&format!("terminals may still find another Node.js first ({e})")),
+    }
+}
+
+/// The first `tool` on this process's PATH, tez's shims included.
+fn first_on_path(tool: &str) -> Option<PathBuf> {
+    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat"] } else { &[""] };
+    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p)
+        .find_map(|d| exts.iter().map(|e| d.join(format!("{tool}{e}"))).find(|f| f.is_file())))
+}
+
 pub fn cli(args: &[&str]) -> R<()> {
     match args {
         [] | ["list"] => list(),
-        ["install"] => { install("lts")?; reload_daemon(); Ok(()) }
-        ["install", specs @ ..] => { for s in specs { install(s)?; } reload_daemon(); Ok(()) }
+        ["install"] => { install("lts")?; reload_daemon(); put_first_on_path(); Ok(()) }
+        ["install", specs @ ..] => { for s in specs { install(s)?; } reload_daemon(); put_first_on_path(); Ok(()) }
         ["default", v] | ["use", v] => {
             let now = set_default(v)?;
             util::ok(&format!("default Node.js: {now}"));
@@ -641,6 +754,11 @@ fn which() -> R<()> {
         }
         None => println!("this folder: {}", dim("no tez Node.js; the node on PATH runs")),
     }
+    if let Some(first) = first_on_path("node") {
+        if !first.parent().map(|d| sites::same_path(d, &paths::bin())).unwrap_or(false) {
+            println!("{}", dim(&format!("this terminal finds {} first; a new terminal finds tez's", first.display())));
+        }
+    }
     Ok(())
 }
 
@@ -674,6 +792,11 @@ mod tests {
         assert!(satisfies("22.11.0", "22.11.0"));
         assert!(!satisfies("22.11.1", "22.11.0"));
         assert!(!satisfies("22.0.0", "not a range"));
+        // pnpm 11's engines: what decides whether corepack's shared pnpm runs on a version.
+        assert!(!satisfies("20.20.2", ">=22.13"));
+        assert!(!satisfies("22.12.0", ">=22.13"));
+        assert!(satisfies("22.13.0", ">=22.13"));
+        assert!(satisfies("24.22.3", ">=22.13"));
     }
 
     #[test]
