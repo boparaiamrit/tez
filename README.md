@@ -91,8 +91,8 @@ Download the package for your system from the
 | --- | --- | --- |
 | Windows (x64) | `tez-<version>-windows-x64-setup.exe` | `tez-<version>-windows-x64.zip` |
 | macOS (Apple silicon) | `tez-<version>-macos-arm64.dmg` | `tez-<version>-macos-arm64-cli.tar.gz` (command line only) |
-| Ubuntu, Debian (x64) | `tez-<version>-linux-x64.deb` | `tez-<version>-linux-x64.tar.gz` |
-| Fedora, RHEL (x64) | `tez-<version>-linux-x64.rpm` | `tez-<version>-linux-x64.tar.gz` |
+| Ubuntu 24.04+, Debian 13+ (x64) | `tez-<version>-linux-x64.deb` | `tez-<version>-linux-x64.tar.gz` |
+| Fedora 40+, RHEL 10+ (x64) | `tez-<version>-linux-x64.rpm` | `tez-<version>-linux-x64.tar.gz` |
 
 Each release is built, smoke-tested and packaged by GitHub Actions on its own operating system,
 and every installer is installed, run and removed there before it is published.
@@ -298,7 +298,7 @@ on its own port beside the default PostgreSQL 17.
 ## macOS and Linux
 
 The same `tez` binary runs on macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). Linux
-needs glibc 2.36 or newer (Ubuntu 24.04, Debian 12, Fedora 37 and later). What differs from Windows:
+needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10 and later). What differs from Windows:
 
 | Part | macOS / Linux source | Notes |
 | --- | --- | --- |
