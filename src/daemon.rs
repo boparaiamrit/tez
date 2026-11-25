@@ -272,6 +272,19 @@ impl Daemon {
         }
         any
     }
+
+    /// `restart`, then start each process with its definition from `fresh` (a new `plan`), so an edit to
+    /// tez.json or the config since `tez up` takes effect. The stop still uses the old definition: its
+    /// stop command belongs to the process that is running. A process missing from `fresh` restarts as it was.
+    pub fn restart_with(&mut self, name: &str, fresh: &[Spec]) -> bool {
+        let any = self.restart(name);
+        for p in self.procs.iter_mut().filter(|p| Self::matches(p, name) && !p.retired) {
+            if let Some(spec) = fresh.iter().find(|s| s.name == p.spec.name) {
+                if p.spec != *spec { p.spec = spec.clone(); }
+            }
+        }
+        any
+    }
 }
 
 /// Everything that should be running for this configuration.
@@ -427,6 +440,30 @@ mod tests {
         assert_eq!(d.procs.len(), 1);
         assert!(d.procs[0].wanted && !d.procs[0].retired);
         assert_eq!(d.procs[0].state, State::Stopping);
+    }
+
+    #[test]
+    fn a_restart_runs_the_current_definition() {
+        // tez.json changed acmeshop's Vite command after `tez up`: a restart must run the new one.
+        let vite = |site: &str, args: &[&str]| Spec::new(format!("{site}/vite"), format!("site:{site}"), PathBuf::from("node")).args(args.iter().copied());
+        let old = vite("acmeshop", &["vite", "--config", "gone.mjs"]);
+        let new = vite("acmeshop", &["vite"]);
+        let horizon = Spec::new("acmeshop/horizon", "site:acmeshop", PathBuf::from("php")).args(["artisan", "horizon"]);
+        let other = vite("storefront", &["vite"]);
+        let mut d = Daemon {
+            procs: vec![Proc::new(old), Proc::new(horizon.clone()), Proc::new(other.clone())],
+            started: SystemTime::now(),
+            notes: Vec::new(),
+        };
+        let fresh = vec![new.clone(), vite("storefront", &["vite", "--port", "5174"])];
+        assert!(d.restart_with("acmeshop", &fresh));
+        assert_eq!(d.procs[0].spec, new, "restarted with its old definition");
+        assert!(d.procs[0].next_start.is_some());
+        // Not in the fresh plan: restarts as it was.
+        assert_eq!(d.procs[1].spec, horizon);
+        assert!(d.procs[1].next_start.is_some());
+        // Not named: keeps its definition until its own restart or a reload.
+        assert_eq!(d.procs[2].spec, other);
     }
 
     #[test]

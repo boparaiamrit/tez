@@ -155,9 +155,12 @@ fn handle(mut stream: TcpStream, shared: Shared) -> bool {
         },
         ("POST", ["api", "proc", name @ .., action]) => {
             let name = name.join("/");
+            // A restart runs the current definition (tez.json may have changed since `tez up`). Planned
+            // before taking the lock; if planning fails, it restarts what is there.
+            let fresh = if *action == "restart" { daemon::plan(&Config::load()).map(|(s, _)| s).unwrap_or_default() } else { Vec::new() };
             let mut d = shared.lock().unwrap();
             let found = match *action {
-                "restart" => d.restart(&name),
+                "restart" => d.restart_with(&name, &fresh),
                 "stop" => d.set_wanted(&name, false),
                 "start" => d.set_wanted(&name, true),
                 _ => false,
