@@ -337,6 +337,27 @@ The command shims also make Horizon's `exec @php ...` command lines work in cmd.
 Horizon writes to Redis is Horizon's own code, so the `/horizon` dashboard works as on Linux.
 Composer skips the `ext-pcntl`/`ext-posix` platform check through the `composer` shim.
 
+## Claude Code
+
+`skills/tez` is a Claude Code skill for your own projects. With it, Claude sets a project up and runs
+it through tez (`tez link`, `tez setup`, `tez up`), reads its logs and databases, and turns one
+project off with `tez down` instead of stopping every site. Install it once for all your projects:
+
+```bash
+# macOS, Linux
+mkdir -p ~/.claude/skills/tez
+curl -fsSL -o ~/.claude/skills/tez/SKILL.md https://raw.githubusercontent.com/boparaiamrit/tez/master/skills/tez/SKILL.md
+```
+
+```powershell
+# Windows
+New-Item -ItemType Directory -Force "$HOME\.claude\skills\tez" | Out-Null
+curl.exe -fsSL -o "$HOME\.claude\skills\tez\SKILL.md" https://raw.githubusercontent.com/boparaiamrit/tez/master/skills/tez/SKILL.md
+```
+
+Working on tez itself? Claude Code loads the skills in `.claude/skills/` when you open this
+repository: development, releases, and the desktop app.
+
 ## Security
 
 - Every service and the dashboard listen on 127.0.0.1 only.
@@ -357,6 +378,8 @@ Composer skips the `ext-pcntl`/`ext-posix` platform check through the `composer`
 src/            the tez binary: CLI, daemon, API, PHP, Node.js, services, sites, web server, tunnels
 app/            tez-app: the GPUI Kit desktop app and tray icon
 assets/         the web dashboard and the PHP files tez loads into PHP
+skills/tez/     the Claude Code skill for using tez from your projects
+.claude/skills/ Claude Code skills for working on tez itself
 ~/.tez/
   bin/          tez, tez-app, and the php, composer, node, npm, npx, pnpm, yarn shims
   php/<x.y>/    PHP versions          node/<x.y.z>/   Node.js versions

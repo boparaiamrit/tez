@@ -2,6 +2,8 @@
 
 .playwright-mcp/
 
-.claude/
+# Claude Code: local worktrees and settings stay out; the project skills are shared.
+/.claude/*
+!/.claude/skills/
 
 .scratch-home/
