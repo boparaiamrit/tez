@@ -57,7 +57,7 @@ curl, tar and certutil in `fetch.rs`. Ask before adding a crate.
 
 | Change | Proof |
 |---|---|
-| Any Rust | `cargo test -p tez -j 4` (48 pass and 1 is ignored as of 0.2.7), with a unit test beside the code you changed |
+| Any Rust | `cargo test -p tez -j 4` (49 pass and 1 is ignored as of 0.2.7 with the restart fix), with a unit test beside the code you changed |
 | A command that does not start the daemon | `target/release/tez(.exe) <command>` with `TEZ_HOME` set to a scratch folder in the same shell; delete the folder afterwards. `TEZ_HOME` moves config, bin, data and logs. Its `tez.json` can change the API and web ports, but not the fixed ones below. |
 | Daemon, processes, web server, services, PHP pools | Not beside the live tez: PHP pools use fixed ports (`9000 + major*100 + minor*10 + n`), and Caddy's admin `127.0.0.1:2019` and the service ports are fixed, so a second daemon collides with the live one. Push a branch, then run `gh workflow run ci.yml --ref <branch>` and `gh run watch <id> --exit-status`. That is the end-to-end smoke test on clean Windows and Linux runners. |
 | macOS or Linux code | CI covers Linux on every push. macOS runs only in the release workflow: `gh workflow run release.yml --ref <branch>` builds, tests and packages all three systems and publishes nothing. |
